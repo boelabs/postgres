@@ -88,7 +88,7 @@ Coming from `postgres` (Postgres.js)? The API is the same: [Migrating from postg
 
 ## Contributing
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the tests (`npm run test:docker` runs everything on any OS) and the checks CI runs. Coding agents start with [AGENTS.md](AGENTS.md). Pull requests are opened by the maintainers; everyone else is welcome through issues.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the tests (`pnpm run test:docker` runs everything on any OS) and the checks CI runs. Coding agents start with [AGENTS.md](AGENTS.md). Pull requests are opened by the maintainers; everyone else is welcome through issues.
 
 Report vulnerabilities through [SECURITY.md](SECURITY.md), never in a public issue.
 

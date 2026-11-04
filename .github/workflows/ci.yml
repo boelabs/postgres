@@ -3,7 +3,7 @@ name: CI
 # Pull requests and main. Nothing here publishes: a release is a `v<version>` tag on a commit of main
 # whose checks all passed (release.yml).
 #
-# The integration tests run in the image of tests/docker, the same one `npm run test:docker` runs
+# The integration tests run in the image of tests/docker, the same one `pnpm run test:docker` runs
 # locally: PostgreSQL, Node.js and Bun at the versions of the matrix, with the two test servers
 # tests/setup.sh starts. What passes here passes on a contributor's machine, whatever its OS.
 on:
@@ -29,22 +29,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - run: npm ci
+      - uses: ./.github/actions/setup
       # Ultracite: Oxfmt checks the formatting, Oxlint the rules (oxlint.config.ts).
-      - run: npm run check
-      - run: npm run test:types
+      - run: pnpm run check
+      - run: pnpm run test:types
       # Every link between the Markdown files, the README's links to docs/ included, leads somewhere.
-      - run: npm run check:docs
+      - run: pnpm run check:docs
       # The package is src/*.js and the types, with no dependencies: anything else in the tarball is
       # a mistake that would reach every user.
       - name: Check what the package publishes
         run: |
           set -euo pipefail
-          files=$(npm pack --dry-run --json | jq -r '.[0].files[].path' | sort)
+          files=$(pnpm pack --dry-run --json | jq -r '.files[].path' | sort)
           echo "$files"
           unexpected=$(echo "$files" | grep -vxE 'src/[a-z]+\.js|types/index\.d\.ts|package\.json|README\.md|LICENSE|CHANGELOG\.md' || true)
           if [ -n "$unexpected" ]; then

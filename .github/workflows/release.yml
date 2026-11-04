@@ -110,26 +110,33 @@ jobs:
           persist-credentials: false
 
       # No dependency cache here: a poisoned cache must not reach what is published.
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: ./.github/actions/setup
         with:
-          node-version-file: .nvmrc
-          registry-url: https://registry.npmjs.org
-
-      # prepublishOnly runs Ultracite, the types and the unit tests once more on this exact commit.
-      - run: npm ci
+          cache: "false"
 
       # Trusted publishing (OIDC) when the package is set up for it on npmjs.com; otherwise NPM_TOKEN,
-      # a granular token that can only publish this package. A version already on npm is left as it
-      # is, so a failed release can be run again.
+      # a granular token for the @boelabs scope. A user config of this job's own names it (pnpm
+      # expands variables only outside the repository), so the token only lives in this step's
+      # environment, never on the runner's disk. prepublishOnly runs Ultracite, the types and the
+      # unit tests once more on this exact commit. npm validates a new version for a few minutes
+      # before serving it: pnpm waits until it is there, so the GitHub release never announces a
+      # version that cannot be installed yet. A version already on npm is left as it is, so a failed
+      # release can be run again.
       - name: Publish
         run: |
-          if npm view "@boelabs/postgres@$VERSION" version > /dev/null 2>&1; then
+          if pnpm view "@boelabs/postgres@$VERSION" version > /dev/null 2>&1; then
             echo "::notice::@boelabs/postgres@$VERSION is already on npm."
             exit 0
           fi
-          npm publish --provenance --access public --tag "${{ needs.verify.outputs.prerelease == 'true' && 'next' || 'latest' }}"
+          if [ -n "$NPM_TOKEN" ]; then
+            echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > "$NPM_CONFIG_USERCONFIG"
+          fi
+          pnpm publish --provenance --access public --no-git-checks \
+            --tag "${{ needs.verify.outputs.prerelease == 'true' && 'next' || 'latest' }}" \
+            --publish-wait-timeout 900000
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/npmrc
 
       # The GitHub release carries the version's section of the changelog.
       - name: Create the GitHub release
