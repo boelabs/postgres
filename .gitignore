@@ -4,6 +4,11 @@ coverage/
 *.tgz
 .DS_Store
 
+# Agent skills are installed from skills-lock.json into .agents/skills; the per-tool links are local.
+.claude/skills/
+# Claude Code settings of one machine; .claude/settings.json is the shared one.
+.claude/settings.local.json
+
 # Test clusters made by tests/setup.sh, and what the Workers test leaves behind
 tests/.pgdata/
 tests/cf/.wrangler/
