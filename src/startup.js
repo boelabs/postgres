@@ -1,490 +1,770 @@
-import crypto from 'crypto'
-import fs from 'fs'
-import * as p from './protocol.js'
-import { Socket, secured, secureOptions } from './socket.js'
-import { Errors } from './errors.js'
-import { channels, active, start, finish, userName } from './diagnostics.js'
+import crypto from "node:crypto";
+import fs from "node:fs";
 
-const noop = () => {}
+import { channels, active, start, finish, userName } from "./diagnostics.js";
+import { Errors } from "./errors.js";
+import * as p from "./protocol.js";
+import { Socket, secured, secureOptions } from "./socket.js";
 
-const R = 82
-    , S = 83
-    , K = 75
-    , E = 69
-    , N = 78
-    , D = 68
-    , Z = 90
+const noop = () => {
+  // Stands in for a handler that has nothing left to do.
+};
 
-export async function open(options, signal = { aborted: false, sockets: new Set() }, first = 0) {
-  const hosts = options.path ? [null] : options.host
-      , wanted = options.target_session_attrs
-      , passes = wanted === 'prefer-standby' ? ['standby', 'any'] : [wanted || 'any']
+const R = 82;
+const S = 83;
+const K = 75;
+const E = 69;
+const N = 78;
+const D = 68;
+const Z = 90;
 
-  let last
+// A fresh signal for each call that is not given the pool's.
+const unsignalled = () => ({ aborted: false, sockets: new Set() });
 
-  for (const want of passes) {
-    for (let n = 0; n < hosts.length; n++) {
-      const i = (first + n) % hosts.length
-          , host = hosts[i]
-          , port = options.port[i] || options.port[0]
-          , [failed, error, ready] = await traced(options, host, port, signal).then(x => [false, null, x], x => [true, x])
-      if (!failed && fits(want, ready.attributes))
-        return (ready.index = i, ready)
-      failed || ready.socket.end(p.Terminate())
-      last = failed ? error : Errors.connection('CONNECTION_DESTROYED', options, host, port)
-      if (signal.aborted)
-        throw last
-    }
+const fits = (want, { readOnly, standby }) =>
+  want === "any" ||
+  (want === "read-write" && !readOnly) ||
+  (want === "read-only" && readOnly) ||
+  (want === "primary" && !standby) ||
+  (want === "standby" && standby);
+
+const unbound = (reason) =>
+  Errors.generic(
+    "CHANNEL_BINDING_REQUIRED",
+    `channel_binding is require, but ${reason}`
+  );
+
+const unsupported = (type) => {
+  throw Errors.generic(
+    "AUTH_TYPE_NOT_IMPLEMENTED",
+    `Authentication type ${type} is not supported`
+  );
+};
+
+const md5 = (x) => crypto.createHash("md5").update(x).digest("hex");
+
+const hmac = (key, x) => crypto.createHmac("sha256", key).update(x).digest();
+
+const sha256 = (x) => crypto.createHash("sha256").update(x).digest();
+
+const xor = (a, b) => {
+  const x = Buffer.allocUnsafe(a.length);
+  for (let i = 0; i < a.length; i += 1) {
+    x[i] = a[i] ^ b[i];
+  }
+  return x;
+};
+
+const negotiate = async (socket, options) => {
+  if (!secured(options) || socket.negotiated) {
+    return;
   }
 
-  throw last
-}
+  const { ssl } = options;
+  const tls = secureOptions(options);
 
-function traced(options, host, port, signal) {
-  if (!active(channels.connect))
-    return attempt(options, host, port, signal)
+  if (options.sslnegotiation === "direct") {
+    return socket.upgrade({ ...tls, ALPNProtocols: ["postgresql"] });
+  }
+
+  const { promise: answer, resolve } = Promise.withResolvers();
+  socket.ondata = (x) => resolve(x[0]);
+  socket.write(p.SSLRequest());
+
+  if ((await answer) === S) {
+    return socket.upgrade(tls);
+  }
+
+  if (ssl !== "prefer" && ssl !== "allow") {
+    throw Errors.generic(
+      "SSL_NOT_SUPPORTED",
+      "The server does not support SSL connections"
+    );
+  }
+};
+
+const cancel = (options, host, port, { pid, secret }) => {
+  const { setTimeout, clearTimeout } = options.timers;
+  const { promise, resolve, reject } = Promise.withResolvers();
+
+  let socket = null;
+  let raw = null;
+  let written = false;
+  let settled = false;
+  let timer;
+
+  const conclude = (error) => {
+    if (settled) {
+      return;
+    }
+
+    settled = true;
+    if (timer) {
+      clearTimeout(timer);
+    }
+    if (socket) {
+      socket.destroy();
+    } else if (raw) {
+      raw.destroy();
+    }
+    if (error) {
+      reject(error);
+    } else {
+      resolve();
+    }
+  };
+
+  const send = async (x) => {
+    socket = x;
+    if (settled) {
+      return socket.destroy();
+    }
+
+    await negotiate(socket, options);
+    socket.onclose = () => conclude();
+    written = true;
+    socket.end(p.Cancel(pid, secret));
+  };
+
+  // As a Promise executor would, a synchronous throw rejects.
+  try {
+    const limit = options.cancel_timeout || options.connect_timeout;
+    timer =
+      limit &&
+      setTimeout(
+        () =>
+          conclude(
+            !written &&
+              Errors.connection("CONNECT_TIMEOUT", options, host, port)
+          ),
+        limit * 1000
+      );
+
+    Socket(options, host, port, (x) => (raw = x))
+      .then(send)
+      .catch(conclude);
+  } catch (error) {
+    reject(error);
+  }
+
+  return promise;
+};
+
+const attempt = (options, host, port, signal) => {
+  const { setTimeout, clearTimeout } = options.timers;
+  const fail = (code) => Errors.connection(code, options, host, port);
+  const { promise, resolve, reject } = Promise.withResolvers();
+
+  let timer;
+  let socket = null;
+  let raw = null;
+  let settled = false;
+
+  const conclude = (failed, error, ready) => {
+    if (settled) {
+      return;
+    }
+
+    settled = true;
+    if (timer) {
+      clearTimeout(timer);
+    }
+    if (socket) {
+      signal.sockets.delete(socket);
+    }
+    let lost = failed;
+    let reason = error;
+    if (signal.aborted && !failed) {
+      lost = true;
+      reason = fail("CONNECTION_DESTROYED");
+    }
+
+    if (lost) {
+      if (socket) {
+        socket.destroy();
+      } else if (raw) {
+        raw.destroy();
+      }
+      return reject(reason);
+    }
+
+    ready.socket.onclose = noop;
+    resolve(ready);
+  };
+
+  const closed = (error) => {
+    if (signal.aborted) {
+      return fail("CONNECTION_DESTROYED");
+    }
+    if (error && error.code) {
+      return error;
+    }
+    return fail("CONNECTION_CLOSED");
+  };
+
+  const startup = (user, database) => {
+    const handshake = Promise.withResolvers();
+
+    // As a Promise executor would, a synchronous throw rejects.
+    try {
+      const abort = (error) => {
+        handshake.reject(error);
+        socket.destroy();
+      };
+
+      const stored = () =>
+        pgpass(
+          options.passfile,
+          options.path ? "localhost" : host,
+          port,
+          database,
+          user
+        ) || "";
+      const auth = Auth({
+        binding: options.channel_binding,
+        pass: options.pass || stored,
+        socket,
+        user,
+      });
+      const parameters = {};
+      const backend = { pid: null, secret: null };
+      const rows = [];
+
+      let probing = false;
+      let status = null;
+      let authing = Promise.resolve();
+
+      const notice = (x) => {
+        try {
+          if (options.onnotice) {
+            options.onnotice(x);
+          } else if (options.onnotice !== false) {
+            console.log(x);
+          }
+        } catch (error) {
+          noop(error);
+        }
+      };
+
+      const authenticate = (x) => {
+        authing = authing
+          .then(() => auth(x))
+          .then((reply) => reply && socket.write(reply));
+        authing.catch(abort);
+      };
+
+      const ready = (x, rest) => {
+        if (!auth.authenticated) {
+          return handshake.reject(
+            Errors.generic(
+              "AUTHENTICATION_INCOMPLETE",
+              "The server was ready before it accepted the authentication"
+            )
+          );
+        }
+
+        status = x;
+        const known =
+          "in_hot_standby" in parameters &&
+          "default_transaction_read_only" in parameters;
+
+        if (options.target_session_attrs && !known && !probing) {
+          probing = true;
+          return socket.write(
+            p.Query(
+              "show transaction_read_only; select pg_catalog.pg_is_in_recovery()"
+            )
+          );
+        }
+
+        frames.pause();
+        socket.ondata = noop;
+        socket.pause();
+        handshake.resolve({
+          attributes: {
+            readOnly:
+              (known ? parameters.default_transaction_read_only : rows[0]) ===
+              "on",
+            standby: known
+              ? parameters.in_hot_standby === "on"
+              : rows[1] === "t",
+          },
+          backend,
+          cancel: () => cancel(options, host, port, backend),
+          host,
+          parameters,
+          port,
+          rest,
+          socket,
+          status,
+        });
+      };
+
+      // authing is a chain of native promises, so awaiting it resumes on the tick then() would.
+      const afterAuth = async (x, rest) => {
+        try {
+          await authing;
+        } catch {
+          return;
+        }
+        ready(x, rest);
+      };
+
+      const frame = (type, x, at, end) => {
+        try {
+          if (type === R) {
+            authenticate(Buffer.from(x.subarray(at, end)));
+          } else if (type === S) {
+            const [k, v] = p.parameterStatus(x, at);
+            parameters[k] = v;
+          } else if (type === K) {
+            Object.assign(backend, p.backendKeyData(x, at));
+          } else if (type === E) {
+            handshake.reject(Errors.postgres(p.error(x, at, end)));
+          } else if (type === N) {
+            notice(p.error(x, at, end));
+          } else if (type === D) {
+            rows.push(
+              x.toString("utf-8", at + 11, at + 11 + x.readInt32BE(at + 7))
+            );
+          } else if (type === Z) {
+            afterAuth(p.readyForQuery(x, at), Buffer.from(x.subarray(end)));
+          }
+        } catch (error) {
+          handshake.reject(error);
+        }
+      };
+
+      const frames = p.Frames(frame, false, abort);
+
+      socket.ondata = (x) => frames.push(x);
+      socket.write(
+        p.Startup({
+          client_encoding: "utf-8",
+          database,
+          user,
+          ...options.connection,
+        })
+      );
+    } catch (error) {
+      handshake.reject(error);
+    }
+
+    return handshake.promise;
+  };
+
+  const session = async () => {
+    socket = await Socket(options, host, port, (x) => (raw = x));
+    if (settled || signal.aborted) {
+      socket.destroy();
+      return conclude(true, fail("CONNECTION_DESTROYED"));
+    }
+
+    signal.sockets.add(socket);
+    socket.onclose = (error) => conclude(true, closed(error));
+    socket.keepAlive(options.keep_alive);
+    await negotiate(socket, options);
+    const user =
+      typeof options.user === "function" ? await options.user() : options.user;
+    return startup(user, options.database || user);
+  };
+
+  const accept = (ready) => conclude(false, null, ready);
+  const refuse = (error) => conclude(true, error);
+
+  // As a Promise executor would, a synchronous throw rejects.
+  try {
+    timer =
+      options.connect_timeout &&
+      setTimeout(
+        () => conclude(true, fail("CONNECT_TIMEOUT")),
+        options.connect_timeout * 1000
+      );
+
+    session().then(accept, refuse);
+  } catch (error) {
+    reject(error);
+  }
+
+  return promise;
+};
+
+const traced = (options, host, port, signal) => {
+  if (!active(channels.connect)) {
+    return attempt(options, host, port, signal);
+  }
 
   const context = {
-    host: options.path ? null : host,
-    port: options.path ? null : port,
-    path: options.path || null,
     database: options.database,
-    user: userName(options),
+    host: options.path ? null : host,
+    path: options.path || null,
+    port: options.path ? null : port,
     ssl: secured(options),
-    sslnegotiation: options.sslnegotiation || 'postgres'
-  }
-  let promise
-  start(channels.connect, context, () => promise = attempt(options, host, port, signal))
+    sslnegotiation: options.sslnegotiation || "postgres",
+    user: userName(options),
+  };
+  let promise;
+  start(
+    channels.connect,
+    context,
+    () => (promise = attempt(options, host, port, signal))
+  );
 
-  return promise.then(ready => {
-    finish(channels.connect, context, null, {
-      pid: ready.backend.pid,
-      status: ready.status,
-      readOnly: ready.attributes.readOnly,
-      standby: ready.attributes.standby
-    })
-    return ready
-  }, error => {
-    finish(channels.connect, context, error)
-    throw error
-  })
-}
+  return promise.then(
+    (ready) => {
+      finish(channels.connect, context, null, {
+        pid: ready.backend.pid,
+        readOnly: ready.attributes.readOnly,
+        standby: ready.attributes.standby,
+        status: ready.status,
+      });
+      return ready;
+    },
+    (error) => {
+      finish(channels.connect, context, error);
+      throw error;
+    }
+  );
+};
 
-function fits(want, { readOnly, standby }) {
-  return want === 'any'
-      || (want === 'read-write' && !readOnly)
-      || (want === 'read-only' && readOnly)
-      || (want === 'primary' && !standby)
-      || (want === 'standby' && standby)
-}
+export const open = async (options, signal = unsignalled(), first = 0) => {
+  const hosts = options.path ? [null] : options.host;
+  const wanted = options.target_session_attrs;
+  const passes =
+    wanted === "prefer-standby" ? ["standby", "any"] : [wanted || "any"];
 
-function attempt(options, host, port, signal) {
-  const { setTimeout, clearTimeout } = options.timers
-      , fail = code => Errors.connection(code, options, host, port)
+  let last;
 
-  return new Promise((resolve, reject) => {
-    const timer = options.connect_timeout && setTimeout(() => done(true, fail('CONNECT_TIMEOUT')), options.connect_timeout * 1000)
-
-    let socket = null
-      , raw = null
-      , settled = false
-
-    session().then(x => done(false, null, x), e => done(true, e))
-
-    function done(failed, error, ready) {
-      if (settled)
-        return
-
-      settled = true
-      timer && clearTimeout(timer)
-      socket && signal.sockets.delete(socket)
-      signal.aborted && !failed && (failed = true, error = fail('CONNECTION_DESTROYED'))
-
-      if (failed) {
-        socket ? socket.destroy() : raw && raw.destroy()
-        return reject(error)
+  for (const want of passes) {
+    for (let n = 0; n < hosts.length; n += 1) {
+      const i = (first + n) % hosts.length;
+      const host = hosts[i];
+      const port = options.port[i] || options.port[0];
+      const [failed, error, ready] = await traced(
+        options,
+        host,
+        port,
+        signal
+      ).then(
+        (x) => [false, null, x],
+        (attemptError) => [true, attemptError]
+      );
+      if (!failed && fits(want, ready.attributes)) {
+        ready.index = i;
+        return ready;
       }
-
-      ready.socket.onclose = () => {}
-      resolve(ready)
+      if (!failed) {
+        ready.socket.end(p.Terminate());
+      }
+      last = failed
+        ? error
+        : Errors.connection("CONNECTION_DESTROYED", options, host, port);
+      if (signal.aborted) {
+        throw last;
+      }
     }
-
-    async function session() {
-      socket = await Socket(options, host, port, x => raw = x)
-      if (settled || signal.aborted)
-        return (socket.destroy(), done(true, fail('CONNECTION_DESTROYED')))
-
-      signal.sockets.add(socket)
-      socket.onclose = error => done(true, signal.aborted ? fail('CONNECTION_DESTROYED') : error && error.code ? error : fail('CONNECTION_CLOSED'))
-      socket.keepAlive(options.keep_alive)
-      await negotiate(socket, options)
-      const user = typeof options.user === 'function' ? await options.user() : options.user
-      return startup(user, options.database || user)
-    }
-
-    function startup(user, database) {
-      return new Promise((resolve, reject) => {
-        const stored = () => pgpass(options.passfile, options.path ? 'localhost' : host, port, database, user) || ''
-            , auth = Auth({ user, pass: options.pass || stored, binding: options.channel_binding, socket })
-            , parameters = {}
-            , backend = { pid: null, secret: null }
-            , frames = p.Frames(frame, false, error => (reject(error), socket.destroy()))
-            , rows = []
-
-        let probing = false
-          , status = null
-          , authing = Promise.resolve()
-
-        socket.ondata = x => frames.push(x)
-        socket.write(p.Startup({ user, database, client_encoding: 'UTF8', ...options.connection }))
-
-        function frame(type, x, start, end) {
-          try {
-            type === R ? authenticate(Buffer.from(x.subarray(start, end)))
-              : type === S ? (([k, v]) => parameters[k] = v)(p.parameterStatus(x, start))
-              : type === K ? Object.assign(backend, p.backendKeyData(x, start))
-              : type === E ? reject(Errors.postgres(p.error(x, start, end)))
-              : type === N ? notice(p.error(x, start, end))
-              : type === D ? rows.push(x.toString('utf8', start + 11, start + 11 + x.readInt32BE(start + 7)))
-              : type === Z && settled(p.readyForQuery(x, start), Buffer.from(x.subarray(end)))
-          } catch (error) {
-            reject(error)
-          }
-        }
-
-        function notice(x) {
-          try {
-            options.onnotice ? options.onnotice(x) : options.onnotice === false || console.log(x) // eslint-disable-line
-          } catch (error) {
-            noop(error)
-          }
-        }
-
-        function authenticate(x) {
-          authing = authing.then(() => auth(x)).then(reply => reply && socket.write(reply))
-          authing.catch(error => (reject(error), socket.destroy()))
-        }
-
-        function settled(x, rest) {
-          authing.then(() => ready(x, rest), () => {})
-        }
-
-        function ready(x, rest) {
-          if (!auth.authenticated)
-            return reject(Errors.generic('AUTHENTICATION_INCOMPLETE', 'The server was ready before it accepted the authentication'))
-
-          status = x
-          const known = 'in_hot_standby' in parameters && 'default_transaction_read_only' in parameters
-
-          if (options.target_session_attrs && !known && !probing) {
-            probing = true
-            return socket.write(p.Query('show transaction_read_only; select pg_catalog.pg_is_in_recovery()'))
-          }
-
-          frames.pause()
-          socket.ondata = () => {}
-          socket.pause()
-          resolve({
-            socket,
-            rest,
-            backend,
-            parameters,
-            status,
-            attributes: {
-              readOnly: (known ? parameters.default_transaction_read_only : rows[0]) === 'on',
-              standby: known ? parameters.in_hot_standby === 'on' : rows[1] === 't'
-            },
-            host,
-            port,
-            cancel: () => cancel(options, host, port, backend)
-          })
-        }
-      })
-    }
-  })
-}
-
-async function negotiate(socket, options) {
-  if (!secured(options) || socket.negotiated)
-    return
-
-  const ssl = options.ssl
-      , tls = secureOptions(options)
-
-  if (options.sslnegotiation === 'direct')
-    return socket.upgrade({ ...tls, ALPNProtocols: ['postgresql'] })
-
-  const answer = new Promise(r => socket.ondata = x => r(x[0]))
-  socket.write(p.SSLRequest())
-
-  if (await answer === S)
-    return socket.upgrade(tls)
-
-  if (ssl !== 'prefer' && ssl !== 'allow')
-    throw Errors.generic('SSL_NOT_SUPPORTED', 'The server does not support SSL connections')
-}
-
-function cancel(options, host, port, { pid, secret }) {
-  const { setTimeout, clearTimeout } = options.timers
-
-  return new Promise((resolve, reject) => {
-    let socket = null
-      , raw = null
-      , written = false
-      , settled = false
-
-    const limit = options.cancel_timeout || options.connect_timeout
-        , timer = limit && setTimeout(() => done(!written && Errors.connection('CONNECT_TIMEOUT', options, host, port)), limit * 1000)
-
-    Socket(options, host, port, x => raw = x).then(async x => {
-      socket = x
-      if (settled)
-        return socket.destroy()
-
-      await negotiate(socket, options)
-      socket.onclose = () => done()
-      written = true
-      socket.end(p.Cancel(pid, secret))
-    }).catch(done)
-
-    function done(error) {
-      if (settled)
-        return
-
-      settled = true
-      timer && clearTimeout(timer)
-      socket ? socket.destroy() : raw && raw.destroy()
-      error ? reject(error) : resolve()
-    }
-  })
-}
-
-const salted = new Map()
-
-function Auth({ user, pass, binding = 'prefer', socket }) {
-  let nonce
-    , signature
-    , verified = true
-    , bound = false
-    , header = 'n,,'
-
-  respond.authenticated = false
-  return respond
-
-  async function respond(x) {
-    const type = x.readInt32BE(5)
-    if ((type === 3 || type === 5) && binding === 'require')
-      throw unbound('the server asked for ' + (type === 3 ? 'a cleartext' : 'an MD5') + ' password')
-
-    return type === 0 ? ok()
-      : type === 3 ? p.Password(await password())
-      : type === 5 ? p.Password('md5' + md5(Buffer.concat([Buffer.from(md5(await password() + user)), x.subarray(9, 13)])))
-      : type === 10 ? start(x)
-      : type === 11 ? proceed(x, await password())
-      : type === 12 ? finish(x)
-      : unsupported(type)
   }
 
-  function start(x) {
-    const offered = x.toString('utf8', 9).split('\0')
-        , certificate = binding !== 'disable' && socket && socket.certificate && socket.certificate()
-        , hash = certificate && endpoint(certificate)
-        , plus = !!hash && offered.includes('SCRAM-SHA-256-PLUS')
+  throw last;
+};
 
-    if (binding === 'require' && !plus)
-      throw unbound(offered.includes('SCRAM-SHA-256-PLUS') ? 'the server certificate could not be hashed for it' : 'the server did not offer it')
+const salted = new Map();
 
-    if (!plus && !offered.includes('SCRAM-SHA-256'))
-      throw Errors.generic('SASL_MECHANISM_NOT_SUPPORTED', 'The server offered no supported SASL mechanism')
+const Auth = ({ user, pass, binding = "prefer", socket }) => {
+  let nonce;
+  let serverSignature;
+  let verified = true;
+  let bound = false;
+  let header = "n,,";
 
-    header = plus ? 'p=tls-server-end-point,,' : hash ? 'y,,' : 'n,,'
-    bound = plus ? hash : false
-    nonce = crypto.randomBytes(18).toString('base64')
-    verified = false
-    return p.SASL(plus ? 'SCRAM-SHA-256-PLUS' : 'SCRAM-SHA-256', header + 'n=*,r=' + nonce)
-  }
+  const password = () =>
+    Promise.resolve(typeof pass === "function" ? pass() : pass);
 
-  function proceed(x, pass) {
-    const res = x.toString('utf8', 9).split(',').reduce((acc, x) => (acc[x[0]] = x.slice(2), acc), {})
-        , key = sha256(pass + '\0' + res.s + '\0' + res.i).toString('base64')
+  const ok = () => {
+    if (!verified) {
+      throw Errors.generic(
+        "SASL_SIGNATURE_MISMATCH",
+        "The server ended SCRAM authentication without proving it knows the password"
+      );
+    }
 
-    if (!res.r.startsWith(nonce))
-      throw Errors.generic('SASL_NONCE_MISMATCH', 'The server nonce does not start with the client nonce')
+    if (binding === "require" && !bound) {
+      throw unbound("the server authenticated without it");
+    }
+
+    respond.authenticated = true;
+    return null;
+  };
+
+  const begin = (x) => {
+    const offered = x.toString("utf-8", 9).split("\0");
+    const certificate =
+      binding !== "disable" &&
+      socket &&
+      socket.certificate &&
+      socket.certificate();
+    const hash = certificate && endpoint(certificate);
+    const plus = !!hash && offered.includes("SCRAM-SHA-256-PLUS");
+
+    if (binding === "require" && !plus) {
+      throw unbound(
+        offered.includes("SCRAM-SHA-256-PLUS")
+          ? "the server certificate could not be hashed for it"
+          : "the server did not offer it"
+      );
+    }
+
+    if (!plus && !offered.includes("SCRAM-SHA-256")) {
+      throw Errors.generic(
+        "SASL_MECHANISM_NOT_SUPPORTED",
+        "The server offered no supported SASL mechanism"
+      );
+    }
+
+    if (plus) {
+      header = "p=tls-server-end-point,,";
+    } else if (hash) {
+      header = "y,,";
+    } else {
+      header = "n,,";
+    }
+    bound = plus ? hash : false;
+    nonce = crypto.randomBytes(18).toString("base64");
+    verified = false;
+    return p.SASL(
+      plus ? "SCRAM-SHA-256-PLUS" : "SCRAM-SHA-256",
+      `${header}n=*,r=${nonce}`
+    );
+  };
+
+  const proceed = (x, secret) => {
+    const res = {};
+    for (const field of x.toString("utf-8", 9).split(",")) {
+      res[field[0]] = field.slice(2);
+    }
+    const key = sha256(`${secret}\0${res.s}\0${res.i}`).toString("base64");
+
+    if (!res.r.startsWith(nonce)) {
+      throw Errors.generic(
+        "SASL_NONCE_MISMATCH",
+        "The server nonce does not start with the client nonce"
+      );
+    }
 
     if (!salted.has(key)) {
-      salted.size >= 64 && salted.delete(salted.keys().next().value)
-      salted.set(key, crypto.pbkdf2Sync(pass, Buffer.from(res.s, 'base64'), +res.i, 32, 'sha256'))
+      if (salted.size >= 64) {
+        salted.delete(salted.keys().next().value);
+      }
+      salted.set(
+        key,
+        crypto.pbkdf2Sync(
+          secret,
+          Buffer.from(res.s, "base64"),
+          +res.i,
+          32,
+          "sha256"
+        )
+      );
     }
 
-    const saltedPassword = salted.get(key)
-        , clientKey = hmac(saltedPassword, 'Client Key')
-        , channel = (bound ? Buffer.concat([Buffer.from(header), bound]) : Buffer.from(header)).toString('base64')
-        , auth = 'n=*,r=' + nonce + ',r=' + res.r + ',s=' + res.s + ',i=' + res.i + ',c=' + channel + ',r=' + res.r
+    const saltedPassword = salted.get(key);
+    const clientKey = hmac(saltedPassword, "Client Key");
+    const channel = (
+      bound ? Buffer.concat([Buffer.from(header), bound]) : Buffer.from(header)
+    ).toString("base64");
+    const auth = `n=*,r=${nonce},r=${res.r},s=${res.s},i=${res.i},c=${channel},r=${
+      res.r
+    }`;
 
-    signature = hmac(hmac(saltedPassword, 'Server Key'), auth).toString('base64')
-    return p.SASLResponse('c=' + channel + ',r=' + res.r + ',p=' + xor(clientKey, hmac(sha256(clientKey), auth)).toString('base64'))
-  }
+    serverSignature = hmac(hmac(saltedPassword, "Server Key"), auth).toString(
+      "base64"
+    );
+    return p.SASLResponse(
+      `c=${channel},r=${res.r},p=${xor(
+        clientKey,
+        hmac(sha256(clientKey), auth)
+      ).toString("base64")}`
+    );
+  };
 
-  function finish(x) {
-    if (!signature || x.toString('utf8', 9).split('\0', 1)[0].slice(2) !== signature)
-      throw Errors.generic('SASL_SIGNATURE_MISMATCH', 'The server did not return the correct signature')
+  const complete = (x) => {
+    if (
+      !serverSignature ||
+      x.toString("utf-8", 9).split("\0", 1)[0].slice(2) !== serverSignature
+    ) {
+      throw Errors.generic(
+        "SASL_SIGNATURE_MISMATCH",
+        "The server did not return the correct signature"
+      );
+    }
 
-    verified = true
-    return null
-  }
+    verified = true;
+    return null;
+  };
 
-  function ok() {
-    if (!verified)
-      throw Errors.generic('SASL_SIGNATURE_MISMATCH', 'The server ended SCRAM authentication without proving it knows the password')
+  const respond = async (x) => {
+    const type = x.readInt32BE(5);
+    if ((type === 3 || type === 5) && binding === "require") {
+      throw unbound(
+        `the server asked for ${type === 3 ? "a cleartext" : "an MD5"} password`
+      );
+    }
 
-    if (binding === 'require' && !bound)
-      throw unbound('the server authenticated without it')
+    if (type === 0) {
+      return ok();
+    }
+    if (type === 3) {
+      return p.Password(await password());
+    }
+    if (type === 5) {
+      return p.Password(
+        `md5${md5(
+          Buffer.concat([
+            Buffer.from(md5((await password()) + user)),
+            x.subarray(9, 13),
+          ])
+        )}`
+      );
+    }
+    if (type === 10) {
+      return begin(x);
+    }
+    if (type === 11) {
+      return proceed(x, await password());
+    }
+    if (type === 12) {
+      return complete(x);
+    }
+    return unsupported(type);
+  };
 
-    respond.authenticated = true
-    return null
-  }
-
-  function unsupported(type) {
-    throw Errors.generic('AUTH_TYPE_NOT_IMPLEMENTED', 'Authentication type ' + type + ' is not supported')
-  }
-
-  function password() {
-    return Promise.resolve(typeof pass === 'function' ? pass() : pass)
-  }
-}
-
-function unbound(reason) {
-  return Errors.generic('CHANNEL_BINDING_REQUIRED', 'channel_binding is require, but ' + reason)
-}
+  respond.authenticated = false;
+  return respond;
+};
 
 const signatures = {
-  '2a864886f70d010104': 'sha256',
-  '2a864886f70d010105': 'sha256',
-  '2a864886f70d01010e': 'sha224',
-  '2a864886f70d01010b': 'sha256',
-  '2a864886f70d01010c': 'sha384',
-  '2a864886f70d01010d': 'sha512',
-  '2a8648ce3d0401': 'sha256',
-  '2a8648ce3d040301': 'sha224',
-  '2a8648ce3d040302': 'sha256',
-  '2a8648ce3d040303': 'sha384',
-  '2a8648ce3d040304': 'sha512',
-  '2a8648ce380403': 'sha256',
-  '608648016503040302': 'sha256'
-}
+  "2a864886f70d010104": "sha256",
+  "2a864886f70d010105": "sha256",
+  "2a864886f70d01010b": "sha256",
+  "2a864886f70d01010c": "sha384",
+  "2a864886f70d01010d": "sha512",
+  "2a864886f70d01010e": "sha224",
+  "2a8648ce380403": "sha256",
+  "2a8648ce3d0401": "sha256",
+  "2a8648ce3d040301": "sha224",
+  "2a8648ce3d040302": "sha256",
+  "2a8648ce3d040303": "sha384",
+  "2a8648ce3d040304": "sha512",
+  "608648016503040302": "sha256",
+};
 
 const digests = {
-  '2b0e03021a': 'sha256',
-  '608648016503040201': 'sha256',
-  '608648016503040202': 'sha384',
-  '608648016503040203': 'sha512',
-  '608648016503040204': 'sha224'
-}
+  "2b0e03021a": "sha256",
+  "608648016503040201": "sha256",
+  "608648016503040202": "sha384",
+  "608648016503040203": "sha512",
+  "608648016503040204": "sha224",
+};
 
-function endpoint(certificate) {
-  try {
-    const x = Buffer.from(certificate)
-        , algorithm = signature(x)
-    return algorithm ? crypto.createHash(algorithm).update(x).digest() : null
-  } catch (_) {
-    return null
-  }
-}
-
-function signature(x) {
-  const certificate = der(x, 0)
-      , tbs = der(x, certificate.body)
-      , algorithm = der(x, tbs.end)
-      , oid = der(x, algorithm.body)
-      , name = x[oid.start] === 0x06 && x.toString('hex', oid.body, oid.end)
-
-  if (name !== '2a864886f70d01010a')
-    return signatures[name]
-
-  if (oid.end >= algorithm.end)
-    return 'sha256'
-
-  const params = der(x, oid.end)
-      , first = params.body < params.end && der(x, params.body)
-
-  if (!first || x[first.start] !== 0xa0)
-    return 'sha256'
-
-  const hash = der(x, der(x, first.body).body)
-  return digests[x.toString('hex', hash.body, hash.end)]
-}
-
-function der(x, start) {
-  let length = x[start + 1]
-    , body = start + 2
+const der = (x, at) => {
+  let length = x[at + 1];
+  let body = at + 2;
 
   if (length & 0x80) {
-    const n = length & 0x7f
-    length = 0
-    for (let i = 0; i < n; i++)
-      length = length * 256 + x[body + i]
-    body += n
+    const n = length & 0x7f;
+    length = 0;
+    for (let i = 0; i < n; i += 1) {
+      length = length * 256 + x[body + i];
+    }
+    body += n;
   }
 
-  if (body + length > x.length)
-    throw new Error('Truncated certificate')
+  if (body + length > x.length) {
+    throw new Error("Truncated certificate");
+  }
 
-  return { start, body, end: body + length }
-}
+  return { body, end: body + length, start: at };
+};
 
-function md5(x) {
-  return crypto.createHash('md5').update(x).digest('hex')
-}
+const signature = (x) => {
+  const certificate = der(x, 0);
+  const tbs = der(x, certificate.body);
+  const algorithm = der(x, tbs.end);
+  const oid = der(x, algorithm.body);
+  const name = x[oid.start] === 0x06 && x.toString("hex", oid.body, oid.end);
 
-function hmac(key, x) {
-  return crypto.createHmac('sha256', key).update(x).digest()
-}
+  if (name !== "2a864886f70d01010a") {
+    return signatures[name];
+  }
 
-function sha256(x) {
-  return crypto.createHash('sha256').update(x).digest()
-}
+  if (oid.end >= algorithm.end) {
+    return "sha256";
+  }
 
-function xor(a, b) {
-  const x = Buffer.allocUnsafe(a.length)
-  for (let i = 0; i < a.length; i++)
-    x[i] = a[i] ^ b[i]
-  return x
-}
+  const params = der(x, oid.end);
+  const first = params.body < params.end && der(x, params.body);
 
-function pgpass(file, host, port, database, user) {
-  if (!file)
-    return null
+  if (!first || x[first.start] !== 0xa0) {
+    return "sha256";
+  }
 
-  let text
+  const hash = der(x, der(x, first.body).body);
+  return digests[x.toString("hex", hash.body, hash.end)];
+};
+
+const endpoint = (certificate) => {
   try {
-    const stat = fs.statSync(file)
-    if (!stat.isFile() || (process.platform !== 'win32' && (stat.mode & 0o077)))
-      return null
-    text = fs.readFileSync(file, 'utf8')
-  } catch (_) {
-    return null
+    const x = Buffer.from(certificate);
+    const algorithm = signature(x);
+    return algorithm ? crypto.createHash(algorithm).update(x).digest() : null;
+  } catch {
+    return null;
   }
-  const wanted = [host, String(port), database, user]
-  for (const line of text.split(/\r?\n/)) {
-    const fields = line && line[0] !== '#' ? split(line) : []
-    if (fields.length === 5 && wanted.every((x, i) => fields[i] === '*' || fields[i] === x))
-      return fields[4]
-  }
-  return null
-}
+};
 
-function split(line) {
-  const fields = []
-  let field = ''
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i]
-    if (c === '\\' && i + 1 < line.length)
-      field += line[++i]
-    else if (c === ':' && fields.length < 4)
-      fields.push(field), field = ''
-    else
-      field += c
+const split = (line) => {
+  const fields = [];
+  let field = "";
+  for (let i = 0; i < line.length; i += 1) {
+    const c = line[i];
+    if (c === "\\" && i + 1 < line.length) {
+      i += 1;
+      field += line[i];
+    } else if (c === ":" && fields.length < 4) {
+      fields.push(field);
+      field = "";
+    } else {
+      field += c;
+    }
   }
-  fields.push(field)
-  return fields
-}
+  fields.push(field);
+  return fields;
+};
+
+const pgpass = (file, host, port, database, user) => {
+  if (!file) {
+    return null;
+  }
+
+  let text;
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || (process.platform !== "win32" && stat.mode & 0o077)) {
+      return null;
+    }
+    text = fs.readFileSync(file, "utf-8");
+  } catch {
+    return null;
+  }
+  const wanted = [host, String(port), database, user];
+  for (const line of text.split(/\r?\n/u)) {
+    const fields = line && line[0] !== "#" ? split(line) : [];
+    if (
+      fields.length === 5 &&
+      wanted.every((x, i) => fields[i] === "*" || fields[i] === x)
+    ) {
+      return fields[4];
+    }
+  }
+  return null;
+};

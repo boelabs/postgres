@@ -1,7 +1,17 @@
-import { t } from '../test.js'
+import { setTimeout as sleep } from "node:timers/promises";
 
-t.ready = Promise.all(['protocol', 'socket', 'types', 'build', 'errors', 'pool', 'options'].map(area =>
-  import('./' + area + '.js').catch(error =>
-    t(area + ' loads', async() => { throw error })
+import { t } from "../test.js";
+
+t.ready = Promise.all(
+  ["protocol", "socket", "types", "build", "errors", "pool", "options"].map(
+    async (area) => {
+      try {
+        return await import(`./${area}.js`);
+      } catch (error) {
+        return t(`${area} loads`, () => {
+          throw error;
+        });
+      }
+    }
   )
-)).then(() => new Promise(r => setTimeout(r)))
+).then(() => sleep(0));

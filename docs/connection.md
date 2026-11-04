@@ -95,10 +95,10 @@ The user can be a function as well, for credentials that rotate both, such as th
 
 ```js
 const sql = postgres({
-  database: 'app',
+  database: "app",
   username: async () => (await secrets.get()).username,
-  password: async () => (await secrets.get()).password
-})
+  password: async () => (await secrets.get()).password,
+});
 ```
 
 ## Password file
@@ -122,16 +122,13 @@ Connections are created lazily once a query is created. This means that simply d
 For example:
 
 ```js
-const sql = postgres() // no connections are opened
+const sql = postgres(); // no connections are opened
 
-await sql`...` // one connection is now opened
-await sql`...` // previous opened connection is reused
+await sql`...`; // one connection is now opened
+await sql`...`; // previous opened connection is reused
 
 // two connections are opened now
-await Promise.all([
-  sql`...`,
-  sql`...`
-])
+await Promise.all([sql`...`, sql`...`]);
 ```
 
 > When there are high amount of concurrent queries, `postgres` will open as many connections as needed up until `max` number of connections is reached. By default `max` is 10. This can be changed by setting `max` in the `postgres()` call. Example - `postgres('connectionURL', { max: 20 })`.
@@ -157,7 +154,7 @@ A query goes to an idle connection when there is one. When every connection is b
 `sql.stats` tells what the pool is doing right now:
 
 ```js
-sql.stats
+sql.stats;
 // { connections: 3, opening: 0, idle: 1, leased: 1, waiting: 0 }
 ```
 
@@ -176,8 +173,8 @@ For example, to close a connection that has either been idle for 20 seconds or e
 ```js
 const sql = postgres({
   idle_timeout: 20,
-  max_lifetime: 60 * 30
-})
+  max_lifetime: 60 * 30,
+});
 ```
 
 ## Auto fetching of array types
@@ -195,7 +192,7 @@ You can disable this feature by setting `fetch_types` to `false`.
 It is also possible to connect to the database without a connection string or any options. @boelabs/postgres will fall back to the common environment variables used by `psql` as in the table below:
 
 ```js
-const sql = postgres()
+const sql = postgres();
 ```
 
 | Option             | Environment Variables    |
@@ -223,7 +220,7 @@ Prepared statements will automatically be created for any queries where it can b
 @boelabs/postgres is tested through PgBouncer in session mode and in transaction mode, with and without its support for prepared statements.
 
 | Pooler mode | Options | What does not work |
-| ----------- | ------- | ------------------ |
+| --- | --- | --- |
 | Session | none | Nothing, apart from what the pooler itself refuses |
 | Transaction, with [`max_prepared_statements`](https://www.pgbouncer.org/config.html#max_prepared_statements) (PgBouncer 1.21+) | none | `LISTEN`, and `DEALLOCATE` sent as SQL |
 | Transaction, without | `prepare: false` | `LISTEN`, and named prepared statements |
@@ -241,22 +238,23 @@ Easily do in-process ssh tunneling to your database by providing a custom socket
 Here's a sample using [ssh2](https://github.com/mscdex/ssh2)
 
 ```js
-import ssh2 from 'ssh2'
+import ssh2 from "ssh2";
 
 const sql = postgres({
   ...options,
-  socket: ({ host: [host], port: [port] }) => new Promise((resolve, reject) => {
-    const ssh = new ssh2.Client()
-    ssh
-    .on('error', reject)
-    .on('ready', () =>
-      ssh.forwardOut('127.0.0.1', 12345, host, port,
-        (err, socket) => err ? reject(err) : resolve(socket)
-      )
-    )
-    .connect(sshOptions)
-  })
-})
+  socket: ({ host: [host], port: [port] }) =>
+    new Promise((resolve, reject) => {
+      const ssh = new ssh2.Client();
+      ssh
+        .on("error", reject)
+        .on("ready", () =>
+          ssh.forwardOut("127.0.0.1", 12345, host, port, (err, socket) =>
+            err ? reject(err) : resolve(socket)
+          )
+        )
+        .connect(sshOptions);
+    }),
+});
 ```
 
 ## Teardown / Cleanup
@@ -271,8 +269,8 @@ Calling `sql.end()` will reject new queries and return a Promise which resolves 
 
 ```js
 {
-  await using sql = postgres()
-  await sql`select 1`
+  await using sql = postgres();
+  await sql`select 1`;
 } // sql.end() has been awaited here
 ```
 
@@ -283,10 +281,10 @@ With `min`, the pool keeps that many connections open once it has been used, and
 ### Sample shutdown using [Prexit](https://github.com/porsager/prexit)
 
 ```js
-import prexit from 'prexit'
+import prexit from "prexit";
 
 prexit(async () => {
-  await sql.end({ timeout: 5 })
-  await new Promise(r => server.close(r))
-})
+  await sql.end({ timeout: 5 });
+  await new Promise((r) => server.close(r));
+});
 ```

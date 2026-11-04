@@ -1,190 +1,258 @@
-import { EventEmitter } from 'events'
+import { EventEmitter } from "node:events";
 
-export function Random(seed) {
-  let x = seed >>> 0
+export const Random = (seed) => {
+  let x = seed >>> 0;
   const next = () => {
-    x = (x + 0x6D2B79F5) >>> 0
-    let t = Math.imul(x ^ (x >>> 15), 1 | x)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
+    x = (x + 0x6d_2b_79_f5) >>> 0;
+    let t = Math.imul(x ^ (x >>> 15), 1 | x);
+    t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+  };
 
   return {
-    next,
+    chance: (p) => next() < p,
     int: (min, max) => min + Math.floor(next() * (max - min + 1)),
-    chance: p => next() < p,
-    pick: xs => xs[Math.floor(next() * xs.length)]
-  }
-}
+    next,
+    pick: (xs) => xs[Math.floor(next() * xs.length)],
+  };
+};
 
-export function Clock(onerror = e => { throw e }) {
-  const timers = new Map()
-      , realImmediate = setImmediate
-  let now = 0
-    , seq = 0
+export const Clock = (
+  onerror = (e) => {
+    throw e;
+  }
+) => {
+  const timers = new Map();
+  const realImmediate = setImmediate;
+  let now = 0;
+  let seq = 0;
 
   const add = (fn, ms, args) => {
-    const id = { ref: () => id, unref: () => id, hasRef: () => true, [Symbol.toPrimitive]: () => id.seq }
-    id.seq = ++seq
-    id.at = now + Math.max(0, +ms || 0)
-    id.fn = () => fn(...args)
-    timers.set(id.seq, id)
-    return id
-  }
-  const clear = id => id && timers.delete(id.seq)
+    seq += 1;
+    const id = {
+      at: now + Math.max(0, +ms || 0),
+      fn: () => fn(...args),
+      hasRef: () => true,
+      ref: () => id,
+      seq,
+      unref: () => id,
+      [Symbol.toPrimitive]: () => id.seq,
+    };
+    timers.set(id.seq, id);
+    return id;
+  };
+  const clear = (id) => id && timers.delete(id.seq);
 
   return {
-    timers: {
-      setTimeout: (fn, ms, ...args) => add(fn, ms, args),
-      clearTimeout: clear,
-      setImmediate: (fn, ...args) => add(fn, 0, args),
-      clearImmediate: clear,
-      now: () => now
+    get now() {
+      return now;
     },
-    get now() { return now },
-    get pending() { return timers.size },
+    get pending() {
+      return timers.size;
+    },
     pendingTimers: () => [...timers.values()],
     async run(until = Infinity) {
-      let same = 0
-        , at = now
+      let same = 0;
+      let at = now;
       while (true) {
-        await new Promise(realImmediate)
-        same = now === at ? same + 1 : 0
-        at = now
-        if (same > 20000)
-          throw new Error('Timer storm: 20,000 timers ran at ' + now + 'ms without the clock moving on')
+        const { promise, resolve } = Promise.withResolvers();
+        realImmediate(resolve);
+        await promise;
+        same = now === at ? same + 1 : 0;
+        at = now;
+        if (same > 20_000) {
+          throw new Error(
+            `Timer storm: 20,000 timers ran at ${
+              now
+            }ms without the clock moving on`
+          );
+        }
 
-        let next = null
-        for (const x of timers.values())
-          (!next || x.at < next.at || (x.at === next.at && x.seq < next.seq)) && (next = x)
-        if (!next || next.at > until)
-          break
+        let next = null;
+        for (const x of timers.values()) {
+          if (
+            !next ||
+            x.at < next.at ||
+            (x.at === next.at && x.seq < next.seq)
+          ) {
+            next = x;
+          }
+        }
+        if (!next || next.at > until) {
+          break;
+        }
 
-        timers.delete(next.seq)
-        now = next.at
+        timers.delete(next.seq);
+        now = next.at;
         try {
-          next.fn()
-        } catch (e) {
-          onerror(e)
+          next.fn();
+        } catch (error) {
+          onerror(error);
         }
       }
-      until !== Infinity && (now = Math.max(now, until))
+      if (until !== Infinity) {
+        now = Math.max(now, until);
+      }
+    },
+    timers: {
+      clearImmediate: clear,
+      clearTimeout: clear,
+      now: () => now,
+      setImmediate: (fn, ...args) => add(fn, 0, args),
+      setTimeout: (fn, ms, ...args) => add(fn, ms, args),
+    },
+  };
+};
+
+export const Pipe = ({ clock, random, delay = 0, split = 0 }) => {
+  const { setTimeout } = clock.timers;
+
+  const chop = (data) => {
+    if (!split || !random.chance(split) || data.length < 2) {
+      return [data];
     }
-  }
-}
 
-export function Pipe({ clock, random, delay = 0, split = 0 }) {
-  const { setTimeout } = clock.timers
+    const at = random.int(1, data.length - 1);
+    return [data.subarray(0, at), data.subarray(at)];
+  };
 
-  const client = end()
-      , server = end()
+  const end = () => {
+    const x = new EventEmitter();
+    let last = 0;
+    let paused = false;
+    let held = [];
 
-  client.peer = server
-  server.peer = client
-  return { client, server }
+    const receive = (data) => {
+      if (x.destroyed) {
+        return;
+      }
+      if (paused) {
+        held.push(data);
+      } else {
+        x.emit("data", data);
+      }
+    };
 
-  function end() {
-    const x = new EventEmitter()
-    let last = 0
-      , paused = false
-      , held = []
+    const later = (fn) => {
+      last = Math.max(last, clock.now + (delay ? random.int(0, delay) : 0));
+      setTimeout(fn, last - clock.now);
+    };
+
+    const send = (data) => {
+      later(() => x.peer.receive(data));
+    };
 
     Object.assign(x, {
-      destroyed: false,
-      writable: true,
-      readable: true,
-      write(data, encoding, cb) {
-        typeof encoding === 'function' && (cb = encoding)
-        if (x.destroyed || !x.writable)
-          return false
+      closed(reset) {
+        if (x.destroyed) {
+          return;
+        }
 
-        data = Buffer.from(data)
-        for (const part of chop(data))
-          send(part)
-        cb && setTimeout(cb, 0)
-        return true
-      },
-      end(data) {
-        if (x.destroyed || !x.writable)
-          return x
-
-        data && data.length && x.write(data)
-        x.writable = false
-        later(() => x.peer.closed(false))
-        return x
+        if (reset) {
+          x.destroyed = true;
+          x.writable = false;
+          x.readable = false;
+          const error = Object.assign(new Error("read ECONNRESET"), {
+            code: "ECONNRESET",
+          });
+          x.emit("error", error);
+          x.emit("close", true);
+        } else {
+          x.readable = false;
+          x.emit("end");
+          if (x.writable) {
+            x.end();
+          }
+          x.destroyed = true;
+          x.emit("close", false);
+        }
       },
       destroy(error) {
-        if (x.destroyed)
-          return x
+        if (x.destroyed) {
+          return x;
+        }
 
-        x.destroyed = true
-        x.writable = x.readable = false
+        x.destroyed = true;
+        x.writable = false;
+        x.readable = false;
         setTimeout(() => {
-          error && x.emit('error', error)
-          x.emit('close', !!error)
-        }, 0)
-        later(() => x.peer.closed(true))
-        return x
+          if (error) {
+            x.emit("error", error);
+          }
+          x.emit("close", !!error);
+        }, 0);
+        later(() => x.peer.closed(true));
+        return x;
       },
-      pause() { paused = true; return x },
+      destroyed: false,
+      end(data) {
+        if (x.destroyed || !x.writable) {
+          return x;
+        }
+
+        if (data && data.length) {
+          x.write(data);
+        }
+        x.writable = false;
+        later(() => x.peer.closed(false));
+        return x;
+      },
+      pause() {
+        paused = true;
+        return x;
+      },
+      readable: true,
+      receive,
+      ref: () => x,
       resume() {
-        paused = false
-        const xs = held
-        held = []
-        xs.forEach(receive)
-        return x
-      },
-      get readyState() {
-        return x.destroyed ? 'closed' : x.readable && x.writable ? 'open' : x.readable ? 'readOnly' : 'writeOnly'
+        paused = false;
+        const xs = held;
+        held = [];
+        for (const data of xs) {
+          receive(data);
+        }
+        return x;
       },
       setKeepAlive: () => x,
       setNoDelay: () => x,
-      ref: () => x,
       unref: () => x,
-      receive,
-      closed(reset) {
-        if (x.destroyed)
-          return
-
-        if (reset) {
-          x.destroyed = true
-          x.writable = x.readable = false
-          const error = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
-          x.emit('error', error)
-          x.emit('close', true)
-        } else {
-          x.readable = false
-          x.emit('end')
-          x.writable && x.end()
-          x.destroyed = true
-          x.emit('close', false)
+      writable: true,
+      write(chunk, encoding, callback) {
+        const cb = typeof encoding === "function" ? encoding : callback;
+        if (x.destroyed || !x.writable) {
+          return false;
         }
-      }
-    })
 
-    return x
+        for (const part of chop(Buffer.from(chunk))) {
+          send(part);
+        }
+        if (cb) {
+          setTimeout(cb, 0);
+        }
+        return true;
+      },
+    });
+    // Object.assign copies a getter's value, not the getter: this one is read once, here, after the
+    // state above is in place, as it always was.
+    Object.assign(x, {
+      get readyState() {
+        if (x.destroyed) {
+          return "closed";
+        }
+        if (x.readable && x.writable) {
+          return "open";
+        }
+        return x.readable ? "readOnly" : "writeOnly";
+      },
+    });
 
-    function receive(data) {
-      if (x.destroyed)
-        return
-      paused ? held.push(data) : x.emit('data', data)
-    }
+    return x;
+  };
 
-    function chop(data) {
-      if (!split || !random.chance(split) || data.length < 2)
-        return [data]
+  const client = end();
+  const server = end();
 
-      const at = random.int(1, data.length - 1)
-      return [data.subarray(0, at), data.subarray(at)]
-    }
-
-    function later(fn) {
-      last = Math.max(last, clock.now + (delay ? random.int(0, delay) : 0))
-      setTimeout(fn, last - clock.now)
-    }
-
-    function send(data) {
-      later(() => x.peer.receive(data))
-    }
-  }
-}
+  client.peer = server;
+  server.peer = client;
+  return { client, server };
+};

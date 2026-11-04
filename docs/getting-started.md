@@ -1,20 +1,23 @@
 # Getting started
 
 ## Usage
+
 Create your `sql` database instance
+
 ```js
 // db.js
-import postgres from '@boelabs/postgres'
+import postgres from "@boelabs/postgres";
 
-const sql = postgres({ /* options */ }) // will use psql environment variables
+const sql = postgres({/* options */}); // will use psql environment variables
 
-export default sql
+export default sql;
 ```
 
 Simply import for use elsewhere
+
 ```js
 // users.js
-import sql from './db.js'
+import sql from "./db.js";
 
 async function getUsersOver(age) {
   const users = await sql`
@@ -22,10 +25,10 @@ async function getUsersOver(age) {
       name,
       age
     from users
-    where age > ${ age }
-  `
+    where age > ${age}
+  `;
   // users = Result [{ name: "Walter", age: 80 }, { name: 'Murray', age: 68 }, ...]
-  return users
+  return users;
 }
 
 async function insertUser({ name, age }) {
@@ -33,10 +36,10 @@ async function insertUser({ name, age }) {
     insert into users
       (name, age)
     values
-      (${ name }, ${ age })
+      (${name}, ${age})
     returning name, age
-  `
+  `;
   // users = Result [{ name: "Murray", age: 68 }]
-  return users
+  return users;
 }
 ```

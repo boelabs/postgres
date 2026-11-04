@@ -4,7 +4,7 @@ The reference for @boelabs/postgres. New to it? Start with [Getting started](get
 
 ## Guides
 
-| | |
+|  |  |
 | --- | --- |
 | [Getting started](getting-started.md) | The `sql` instance, a first query, a first insert |
 | [Queries](queries.md) | Parameters and their types, dynamic inserts, updates and `where in`, fragments and identifiers |
@@ -15,7 +15,7 @@ The reference for @boelabs/postgres. New to it? Start with [Getting started](get
 
 ## Running it
 
-| | |
+|  |  |
 | --- | --- |
 | [Connection](connection.md) | Every option, environment variables, the pool, timeouts, multiple hosts, poolers, shutdown |
 | [TLS](tls.md) | `sslmode` as in libpq, client certificates, direct TLS and channel binding |

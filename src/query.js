@@ -1,319 +1,389 @@
-import util from 'util'
-import { build, isQuery, Join, joinStrings } from './build.js'
-import { ours, Errors, queryError } from './errors.js'
-import { channels, active, start, finish, now, userName } from './diagnostics.js'
-import { statement } from './result.js'
+import { inspect } from "node:util";
 
-const origins = new WeakMap()
-    , noop = () => {}
+import { build, isQuery, Join, joinStrings } from "./build.js";
+import {
+  channels,
+  active,
+  start,
+  finish,
+  now,
+  userName,
+} from "./diagnostics.js";
+import { ours, Errors, queryError } from "./errors.js";
+import { statement } from "./result.js";
 
-export const CLOSE = {}
+const origins = new WeakMap();
+const noop = () => {
+  // A cancel that fails is not the query's failure: it is ignored.
+};
+
+export const CLOSE = {};
 
 export class Query extends Promise {
   constructor(strings, args, handler, options = {}) {
-    let resolve
-      , reject
+    let resolve;
+    let reject;
 
     super((a, b) => {
-      resolve = a
-      reject = b
-    })
+      resolve = a;
+      reject = b;
+    });
 
-    this.fulfil = resolve
-    this.fail = reject
+    this.fulfil = resolve;
+    this.fail = reject;
 
-    this[isQuery] = true
-    this.tagged = Array.isArray(strings.raw)
-    this.strings = strings
-    this.args = args
-    this.handler = handler
-    this.options = options
+    this[isQuery] = true;
+    this.tagged = Array.isArray(strings.raw);
+    this.strings = strings;
+    this.args = args;
+    this.handler = handler;
+    this.options = options;
 
-    this.state = null
-    this.source = null
-    this.active = false
-    this.executed = false
-    this.settled = false
-    this.built = null
-    this.trace = null
-    this.aborts = null
-    this.timer = null
-    this.timedOut = false
+    this.state = null;
+    this.source = null;
+    this.active = false;
+    this.executed = false;
+    this.settled = false;
+    this.built = null;
+    this.trace = null;
+    this.aborts = null;
+    this.timer = null;
+    this.timedOut = false;
 
-    this.originError = handler.debug ? new Error() : null
-    this.tagged && !handler.debug && !origins.has(strings) && origins.set(strings, located())
+    // Only its stack is kept: the first line, with this message, is replaced by the error's own.
+    this.originError = handler.debug ? new Error("query origin") : null;
+    if (this.tagged && !handler.debug && !origins.has(strings)) {
+      origins.set(strings, located());
+    }
   }
 
   static get [Symbol.species]() {
-    return Promise
+    return Promise;
   }
 
   join(items) {
-    const kept = [...items].filter(x => x !== false && x !== null && x !== undefined)
-        , joined = new Query(joinStrings, [new Join(this, kept)], this.handler)
+    const kept = [...items].filter(
+      (x) => x !== false && x !== null && x !== undefined
+    );
+    const joined = new Query(joinStrings, [new Join(this, kept)], this.handler);
 
-    Object.defineProperty(joined, 'length', { value: kept.length })
-    return joined
+    Object.defineProperty(joined, "length", { value: kept.length });
+    return joined;
   }
 
   resolve(x) {
-    this.timer && untime(this)
-    this.aborts && this.aborts()
-    this.active = false
-    this.settled = true
-    this.trace && traced(this, null, x)
-    this.fulfil(x)
+    if (this.timer) {
+      untime(this);
+    }
+    if (this.aborts) {
+      this.aborts();
+    }
+    this.active = false;
+    this.settled = true;
+    if (this.trace) {
+      traced(this, null, x);
+    }
+    this.fulfil(x);
   }
 
-  reject(x) {
-    this.timer && untime(this)
-    this.timedOut && x && timedOut(x) && (x = late(this, x))
-    this.aborts && this.aborts()
-    this.active = false
-    this.settled = true
-    this.trace && traced(this, x)
-    this.fail(x)
+  reject(reason) {
+    let x = reason;
+    if (this.timer) {
+      untime(this);
+    }
+    if (this.timedOut && x && timedOut(x)) {
+      x = late(this, x);
+    }
+    if (this.aborts) {
+      this.aborts();
+    }
+    this.active = false;
+    this.settled = true;
+    if (this.trace) {
+      traced(this, x);
+    }
+    this.fail(x);
   }
 
   get origin() {
     return this.originError
       ? this.originError.stack
-      : this.tagged && origins.get(this.strings) || ''
+      : (this.tagged && origins.get(this.strings)) || "";
   }
 
   get statement() {
-    return this.source && statement(this.source)
+    return this.source && statement(this.source);
   }
 
   build() {
-    return this.built || (this.built = build(this, this.handler.options))
+    return (this.built ||= build(this, this.handler.options));
   }
 
   get text() {
-    return this.build().text
+    return this.build().text;
   }
 
   get parameters() {
-    return this.build().values
+    return this.build().values;
   }
 
-  [util.inspect.custom](depth, options, inspect) {
-    if (!this.handler.debug)
-      return 'Query {}'
-
-    let x
-    try {
-      x = this.build()
-    } catch (error) {
-      return 'Query { ' + error.message + ' }'
+  [inspect.custom](depth, options, nested) {
+    if (!this.handler.debug) {
+      return "Query {}";
     }
-    return 'Query ' + inspect({ text: x.text, parameters: x.values }, options)
+
+    let x;
+    try {
+      x = this.build();
+    } catch (error) {
+      return `Query { ${error.message} }`;
+    }
+    return `Query ${nested({ parameters: x.values, text: x.text }, options)}`;
   }
 
   cancel() {
-    return this.handler.cancel ? this.handler.cancel(this) : Promise.resolve()
+    return this.handler.cancel ? this.handler.cancel(this) : Promise.resolve();
   }
 
   signal(signal) {
-    if (!signal || this.settled)
-      return this
+    if (!signal || this.settled) {
+      return this;
+    }
 
-    if (signal.aborted)
-      return (this.cancel().catch(noop), this)
+    if (signal.aborted) {
+      return (this.cancel().catch(noop), this);
+    }
 
-    const abort = () => this.cancel().catch(noop)
-    signal.addEventListener('abort', abort, { once: true })
-    this.aborts = () => (this.aborts = null, signal.removeEventListener('abort', abort))
-    return this
+    const abort = () => this.cancel().catch(noop);
+    signal.addEventListener("abort", abort, { once: true });
+    this.aborts = () => {
+      this.aborts = null;
+      signal.removeEventListener("abort", abort);
+    };
+    return this;
   }
 
   simple() {
-    this.options.simple = true
-    this.options.prepare = false
-    return this
+    this.options.simple = true;
+    this.options.prepare = false;
+    return this;
   }
 
   async readable() {
-    this.simple()
-    this.streaming = true
-    return this
+    this.simple();
+    this.streaming = true;
+    return this;
   }
 
   async writable() {
-    this.simple()
-    this.streaming = true
-    return this
+    this.simple();
+    this.streaming = true;
+    return this;
   }
 
-  cursor(rows = 1, fn) {
-    this.options.simple = false
-    if (typeof rows === 'function') {
-      fn = rows
-      rows = 1
+  // cursor(fn) and cursor(rows, fn): rows is 1 when left out.
+  cursor(rows, fn) {
+    this.options.simple = false;
+    const callback = typeof rows === "function" ? rows : fn;
+    this.cursorRows =
+      typeof rows === "function" || rows === undefined ? 1 : rows;
+
+    if (typeof callback === "function") {
+      this.cursorFn = callback;
+      return this;
     }
 
-    this.cursorRows = rows
-
-    if (typeof fn === 'function')
-      return (this.cursorFn = fn, this)
-
-    let prev
+    let prev;
     return {
       [Symbol.asyncIterator]: () => ({
         next: () => {
-          if (this.executed && !this.active)
-            return { done: true }
+          if (this.executed && !this.active) {
+            return { done: true };
+          }
 
-          prev && prev()
-          const promise = new Promise((resolve, reject) => {
-            this.cursorFn = value => {
-              resolve({ value, done: false })
-              return new Promise(r => prev = r)
+          if (prev) {
+            prev();
+          }
+          const { promise, resolve, reject } = Promise.withResolvers();
+          this.cursorFn = (value) => {
+            resolve({ done: false, value });
+            const consumed = Promise.withResolvers();
+            prev = consumed.resolve;
+            return consumed.promise;
+          };
+          this.resolve = (x) => {
+            this.active = false;
+            this.settled = true;
+            if (this.trace) {
+              traced(this, null, x);
             }
-            this.resolve = x => (this.active = false, this.settled = true, this.trace && traced(this, null, x), resolve({ done: true }))
-            this.reject = x => (this.active = false, this.settled = true, this.trace && traced(this, x), reject(x))
-          })
-          this.execute()
-          return promise
+            resolve({ done: true });
+          };
+          this.reject = (x) => {
+            this.active = false;
+            this.settled = true;
+            if (this.trace) {
+              traced(this, x);
+            }
+            reject(x);
+          };
+          this.execute();
+          return promise;
         },
         return() {
-          prev && prev(CLOSE)
-          return { done: true }
-        }
-      })
-    }
+          if (prev) {
+            prev(CLOSE);
+          }
+          return { done: true };
+        },
+      }),
+    };
   }
 
   describe() {
-    this.options.simple = false
-    this.onlyDescribe = this.options.prepare = true
-    return this
+    this.options.simple = false;
+    this.options.prepare = true;
+    this.onlyDescribe = true;
+    return this;
   }
 
+  // oxlint-disable-next-line class-methods-use-this -- a method of the query API, kept to point to its new name
   stream() {
-    throw new Error('.stream has been renamed to .forEach')
+    throw new Error(".stream has been renamed to .forEach");
   }
 
   forEach(fn) {
-    this.forEachFn = fn
-    this.handle()
-    return this
+    this.forEachFn = fn;
+    this.handle();
+    return this;
   }
 
   raw() {
-    this.isRaw = true
-    return this
+    this.isRaw = true;
+    return this;
   }
 
   values() {
-    this.isRaw = 'values'
-    return this
+    this.isRaw = "values";
+    return this;
   }
 
   handle() {
-    if (this.executed)
-      return
+    if (this.executed) {
+      return;
+    }
 
-    this.executed = true
-    queueMicrotask(() => this.run())
+    this.executed = true;
+    queueMicrotask(() => this.run());
   }
 
   run() {
-    active(channels.query)
-      ? start(channels.query, this.trace = context(this), () => this.handler(this))
-      : this.handler(this)
+    if (active(channels.query)) {
+      this.trace = context(this);
+      start(channels.query, this.trace, () => this.handler(this));
+    } else {
+      this.handler(this);
+    }
   }
 
   execute() {
-    this.handle()
-    return this
+    this.handle();
+    return this;
   }
 
+  // oxlint-disable-next-line unicorn/no-thenable -- a query is a promise that runs when awaited
   then(fulfilled, rejected) {
-    this.handle()
-    return super.then(fulfilled, rejected)
+    this.handle();
+    return super.then(fulfilled, rejected);
   }
 
   catch(rejected) {
-    this.handle()
-    return super.catch(rejected)
+    this.handle();
+    return super.catch(rejected);
   }
 
   finally(fn) {
-    this.handle()
-    return super.finally(fn)
+    this.handle();
+    return super.finally(fn);
   }
 }
 
-function untime(q) {
-  q.handler.options.timers.clearTimeout(q.timer)
-  q.timer = null
-}
+const untime = (q) => {
+  q.handler.options.timers.clearTimeout(q.timer);
+  q.timer = null;
+};
 
-function timedOut(x) {
-  return x.code === '57014' || (x.code === 'CONNECTION_DESTROYED' && !!x.cause && x.cause.code === 'CANCEL_UNANSWERED')
-}
+const timedOut = (x) =>
+  x.code === "57014" ||
+  (x.code === "CONNECTION_DESTROYED" &&
+    !!x.cause &&
+    x.cause.code === "CANCEL_UNANSWERED");
 
-function late(q, error) {
-  const x = Errors.generic('QUERY_TIMEOUT', 'The query did not finish within query_timeout (' + q.handler.options.query_timeout + ' seconds)')
-  x.cause = error.code === 'CONNECTION_DESTROYED' ? error.cause : error
-  return queryError(x, q, q.handler.debug)
-}
+const late = (q, error) => {
+  const x = Errors.generic(
+    "QUERY_TIMEOUT",
+    `The query did not finish within query_timeout (${
+      q.handler.options.query_timeout
+    } seconds)`
+  );
+  x.cause = error.code === "CONNECTION_DESTROYED" ? error.cause : error;
+  return queryError(x, q, q.handler.debug);
+};
 
-function context(q) {
-  const options = q.handler.options || {}
-  let text = null
+const context = (q) => {
+  const options = q.handler.options || {};
+  let text = null;
   if (q.strings.length) {
     try {
-      text = q.text
-    } catch (error) {
-      text = null
+      ({ text } = q);
+    } catch {
+      text = null;
     }
   }
   return {
-    query: text,
-    parameters: undefined,
-    database: options.database,
-    user: userName(options),
-    host: null,
-    port: null,
-    connection: null,
-    statement: null,
     command: null,
+    complete: null,
+    connection: null,
     count: null,
+    database: options.database,
+    firstByte: null,
+    host: null,
+    parameters: undefined,
+    port: null,
+    query: text,
     queued: now(),
     sent: null,
-    firstByte: null,
-    complete: null
-  }
-}
+    statement: null,
+    user: userName(options),
+  };
+};
 
-function traced(q, error, result) {
-  const x = q.trace
-  q.trace = null
-  x.complete = now()
-  if (result && typeof result === 'object' && 'command' in result) {
-    x.command = result.command
-    x.count = result.count
+const traced = (q, error, result) => {
+  const x = q.trace;
+  q.trace = null;
+  x.complete = now();
+  if (result && typeof result === "object" && "command" in result) {
+    x.command = result.command;
+    x.count = result.count;
   }
-  finish(channels.query, x, error, result)
-}
+  finish(channels.query, x, error, result);
+};
 
-function located() {
-  const limit = Error.stackTraceLimit
-  Error.stackTraceLimit = 8
+const located = () => {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 8;
   try {
-    return trim(String(new Error().stack))
-  } catch (error) {
-    return ''
+    return trim(String(new Error("query origin").stack));
+  } catch {
+    return "";
   } finally {
-    Error.stackTraceLimit = limit
+    Error.stackTraceLimit = limit;
   }
-}
+};
 
-function trim(stack) {
-  const lines = stack.split('\n')
-      , i = lines.findIndex((x, i) => i > 0 && !ours(x))
+const trim = (stack) => {
+  const lines = stack.split("\n");
+  const i = lines.findIndex((line, index) => index > 0 && !ours(line));
 
-  return i === -1 ? stack : lines.slice(0, i + 1).join('\n')
-}
+  return i === -1 ? stack : lines.slice(0, i + 1).join("\n");
+};

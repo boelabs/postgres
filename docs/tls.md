@@ -7,8 +7,8 @@ Connections are unencrypted unless `ssl`, the url or `PGSSLMODE` asks for TLS.
 `ssl` takes the modes of libpq's `sslmode`, and a connection url or `PGSSLMODE` can set them as well, so a url that works with `psql` works here:
 
 | Mode | Encrypts | Checks the certificate authority | Checks the host name |
-| ---- | -------- | -------------------------------- | -------------------- |
-| `false` or `'disable'` (the default) | no | | |
+| --- | --- | --- | --- |
+| `false` or `'disable'` (the default) | no |  |  |
 | `'allow'`, `'prefer'` | when the server has TLS | no | no |
 | `'require'` | yes | only when `sslrootcert` is given | no |
 | `'verify-ca'` | yes | yes | no |
@@ -18,7 +18,9 @@ The certificate authorities are the runtime's trusted ones, or those in the file
 
 ```js
 // A server with a certificate of its own authority, reached by an internal address
-const sql = postgres('postgres://user@10.0.0.5/db?sslmode=verify-ca&sslrootcert=/etc/ssl/db-ca.pem')
+const sql = postgres(
+  "postgres://user@10.0.0.5/db?sslmode=verify-ca&sslrootcert=/etc/ssl/db-ca.pem"
+);
 ```
 
 As in libpq, TLS is never asked for over a Unix socket, and libpq's own url parameters, such as `sslrootcert` or `keepalives`, are not sent to the server as run-time parameters. An unknown mode throws. Cloudflare Workers always check the certificate and its host name.
@@ -31,11 +33,11 @@ Although [vulnerable to MITM attacks](https://security.stackexchange.com/a/22929
 
 ```js
 const sql =
-  process.env.NODE_ENV === 'production'
+  process.env.NODE_ENV === "production"
     ? // "Unless you're using a Private or Shield Heroku Postgres database, Heroku Postgres does not currently support verifiable certificates"
       // https://help.heroku.com/3DELT3RK/why-can-t-my-third-party-utility-connect-to-heroku-postgres-with-ssl
       postgres({ ssl: { rejectUnauthorized: false } })
-    : postgres()
+    : postgres();
 ```
 
 For more information regarding `ssl` with `postgres`, check out the [Node.js documentation for tls](https://nodejs.org/api/tls.html#tlsconnectoptions-callback).
@@ -47,9 +49,11 @@ On Node.js an `ssl` object with a `ca` is made into one TLS context, which every
 PostgreSQL 17 and later can start TLS on the first byte instead of being asked first, which saves a round trip when connecting:
 
 ```js
-const sql = postgres('postgres://host/db?sslmode=require&sslnegotiation=direct')
+const sql = postgres(
+  "postgres://host/db?sslmode=require&sslnegotiation=direct"
+);
 // or
-const sql = postgres({ ssl: 'require', sslnegotiation: 'direct' })
+const sql = postgres({ ssl: "require", sslnegotiation: "direct" });
 ```
 
 On Node.js this is also the fastest encrypted connection, as it reads into the same shared buffer as a plain one. It needs a server that supports it, and is not available in Cloudflare Workers, whose sockets cannot send the ALPN it requires.
@@ -63,7 +67,9 @@ Over TLS, SCRAM authentication is bound to the server's certificate with SCRAM-S
 - `'disable'` never binds.
 
 ```js
-const sql = postgres('postgres://host/db?sslmode=verify-full&channel_binding=require')
+const sql = postgres(
+  "postgres://host/db?sslmode=verify-full&channel_binding=require"
+);
 ```
 
 Certificates signed with Ed25519, for which binding isn't defined, are not bound. Cloudflare Workers sockets don't expose the server certificate, so there `'prefer'` doesn't bind and `'require'` is rejected.

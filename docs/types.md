@@ -11,19 +11,21 @@ const sql = postgres({
   types: {
     rect: {
       // The pg_types oid to pass to the db along with the serialized value.
-      to        : 1337,
+      to: 1337,
 
       // An array of pg_types oids to handle when parsing values coming from the db.
-      from      : [1337],
+      from: [1337],
 
       //Function that transform values before sending them to the db.
-      serialize : ({ x, y, width, height }) => [x, y, width, height],
+      serialize: ({ x, y, width, height }) => [x, y, width, height],
 
       // Function that transforms values coming from the db.
-      parse     : ([x, y, width, height]) => { x, y, width, height }
-    }
-  }
-})
+      parse: ([x, y, width, height]) => {
+        (x, y, width, height);
+      },
+    },
+  },
+});
 
 // Now you can use sql.typed.rect() as specified above
 const [custom] = await sql`
@@ -32,13 +34,12 @@ const [custom] = await sql`
     rect
   ) values (
     'wat',
-    ${ sql.typed.rect({ x: 13, y: 37, width: 42, height: 80 }) }
+    ${sql.typed.rect({ x: 13, y: 37, width: 42, height: 80 })}
   )
   returning *
-`
+`;
 
 // custom = { name: 'wat', rect: { x: 13, y: 37, width: 42, height: 80 } }
-
 ```
 
 A type whose oid isn't fixed, such as one from an extension, can be given by name instead, with `schema.name` allowed. Names are looked up when the pool starts, along with the type's array type, and queries wait for that. A name that doesn't exist rejects queries with `TYPE_NOT_FOUND`, and the lookup is tried again a second later, so a type created afterwards is found. Types by name need `fetch_types`.
@@ -47,15 +48,15 @@ A type whose oid isn't fixed, such as one from an extension, can be given by nam
 const sql = postgres({
   types: {
     vector: {
-      to        : 'vector',
-      from      : ['vector'],
-      serialize : x => '[' + x.join(',') + ']',
-      parse     : x => JSON.parse(x)
-    }
-  }
-})
+      to: "vector",
+      from: ["vector"],
+      serialize: (x) => "[" + x.join(",") + "]",
+      parse: (x) => JSON.parse(x),
+    },
+  },
+});
 
-await sql`insert into items ${ sql({ embedding: sql.typed.vector([1, 2, 3]) }) }`
+await sql`insert into items ${sql({ embedding: sql.typed.vector([1, 2, 3]) })}`;
 ```
 
 ## Numbers, bigint, numeric
@@ -69,12 +70,12 @@ If you want to use `BigInt` you can add this custom type:
 ```js
 const sql = postgres({
   types: {
-    bigint: postgres.BigInt
-  }
-})
+    bigint: postgres.BigInt,
+  },
+});
 ```
 
-There is currently no guaranteed way to handle `numeric` / `decimal` types in native Javascript. **These [and similar] types will be returned as a `string`**. The best way in this case is to use  [custom types](#custom-types).
+There is currently no guaranteed way to handle `numeric` / `decimal` types in native Javascript. **These [and similar] types will be returned as a `string`**. The best way in this case is to use [custom types](#custom-types).
 
 ## Data Transformation
 
@@ -82,9 +83,9 @@ There is currently no guaranteed way to handle `numeric` / `decimal` types in na
 
 Built in transformation functions are:
 
-* For camelCase - `postgres.camel`, `postgres.toCamel`, `postgres.fromCamel`
-* For PascalCase - `postgres.pascal`, `postgres.toPascal`, `postgres.fromPascal`
-* For Kebab-Case - `postgres.kebab`, `postgres.toKebab`, `postgres.fromKebab`
+- For camelCase - `postgres.camel`, `postgres.toCamel`, `postgres.fromCamel`
+- For PascalCase - `postgres.pascal`, `postgres.toPascal`, `postgres.fromPascal`
+- For Kebab-Case - `postgres.kebab`, `postgres.toKebab`, `postgres.fromKebab`
 
 These built in transformations will only convert to/from snake_case. For example, using `{ transform: postgres.toCamel }` will convert the column names to camelCase only if the column names are in snake_case to begin with. `{ transform: postgres.fromCamel }` will convert camelCase only to snake_case.
 
@@ -92,13 +93,13 @@ By default, using `postgres.camel`, `postgres.pascal` and `postgres.kebab` will 
 
 ```js
 // Transform the column names to and from camel case
-const sql = postgres({ transform: postgres.camel })
+const sql = postgres({ transform: postgres.camel });
 
-await sql`CREATE TABLE IF NOT EXISTS camel_case (a_test INTEGER, b_test TEXT)`
-await sql`INSERT INTO camel_case ${ sql([{ aTest: 1, bTest: 1 }]) }`
-const data = await sql`SELECT ${ sql('aTest', 'bTest') } FROM camel_case`
+await sql`CREATE TABLE IF NOT EXISTS camel_case (a_test INTEGER, b_test TEXT)`;
+await sql`INSERT INTO camel_case ${sql([{ aTest: 1, bTest: 1 }])}`;
+const data = await sql`SELECT ${sql("aTest", "bTest")} FROM camel_case`;
 
-console.log(data) // [ { aTest: 1, bTest: '1' } ]
+console.log(data); // [ { aTest: 1, bTest: '1' } ]
 ```
 
 The built-in transforms also rename the keys of JSON values in results, but send JSON values as they are. Add `json: false` to leave JSON values as they are both ways, or `json: true` to rename their keys when sending as well: `postgres({ transform: { ...postgres.camel, json: false } })`.
@@ -110,25 +111,25 @@ To only perform half of the transformation (eg. only the transformation **to** o
 ```js
 // Transform the column names only to camel case
 // (for the results that are returned from the query)
-postgres({ transform: postgres.toCamel })
+postgres({ transform: postgres.toCamel });
 
-await sql`CREATE TABLE IF NOT EXISTS camel_case (a_test INTEGER)`
-await sql`INSERT INTO camel_case ${ sql([{ a_test: 1 }]) }`
-const data = await sql`SELECT a_test FROM camel_case`
+await sql`CREATE TABLE IF NOT EXISTS camel_case (a_test INTEGER)`;
+await sql`INSERT INTO camel_case ${sql([{ a_test: 1 }])}`;
+const data = await sql`SELECT a_test FROM camel_case`;
 
-console.log(data) // [ { aTest: 1 } ]
+console.log(data); // [ { aTest: 1 } ]
 ```
 
 ```js
 // Transform the column names only from camel case
 // (for interpolated inserts, updates, and selects)
-const sql = postgres({ transform: postgres.fromCamel })
+const sql = postgres({ transform: postgres.fromCamel });
 
-await sql`CREATE TABLE IF NOT EXISTS camel_case (a_test INTEGER)`
-await sql`INSERT INTO camel_case ${ sql([{ aTest: 1 }]) }`
-const data = await sql`SELECT ${ sql('aTest') } FROM camel_case`
+await sql`CREATE TABLE IF NOT EXISTS camel_case (a_test INTEGER)`;
+await sql`INSERT INTO camel_case ${sql([{ aTest: 1 }])}`;
+const data = await sql`SELECT ${sql("aTest")} FROM camel_case`;
 
-console.log(data) // [ { a_test: 1 } ]
+console.log(data); // [ { a_test: 1 } ]
 ```
 
 > Note that @boelabs/postgres does not rewrite the static parts of the tagged template strings. So to transform column names in your queries, the `sql()` helper must be used - eg. `${ sql('columnName') }` as in the examples above.
@@ -141,15 +142,15 @@ By default, @boelabs/postgres will throw the error `UNDEFINED_VALUE: Undefined v
 // Transform the column names to and from camel case
 const sql = postgres({
   transform: {
-    undefined: null
-  }
-})
+    undefined: null,
+  },
+});
 
-await sql`CREATE TABLE IF NOT EXISTS transform_undefined (a_test INTEGER)`
-await sql`INSERT INTO transform_undefined ${ sql([{ a_test: undefined }]) }`
-const data = await sql`SELECT a_test FROM transform_undefined`
+await sql`CREATE TABLE IF NOT EXISTS transform_undefined (a_test INTEGER)`;
+await sql`INSERT INTO transform_undefined ${sql([{ a_test: undefined }])}`;
+const data = await sql`SELECT a_test FROM transform_undefined`;
 
-console.log(data) // [ { a_test: null } ]
+console.log(data); // [ { a_test: null } ]
 ```
 
 To combine with the built in transform functions, spread the transform in the `transform` object:
@@ -159,23 +160,23 @@ To combine with the built in transform functions, spread the transform in the `t
 const sql = postgres({
   transform: {
     ...postgres.camel,
-    undefined: null
-  }
-})
+    undefined: null,
+  },
+});
 
-await sql`CREATE TABLE IF NOT EXISTS transform_undefined (a_test INTEGER)`
-await sql`INSERT INTO transform_undefined ${ sql([{ aTest: undefined }]) }`
-const data = await sql`SELECT ${ sql('aTest') } FROM transform_undefined`
+await sql`CREATE TABLE IF NOT EXISTS transform_undefined (a_test INTEGER)`;
+await sql`INSERT INTO transform_undefined ${sql([{ aTest: undefined }])}`;
+const data = await sql`SELECT ${sql("aTest")} FROM transform_undefined`;
 
-console.log(data) // [ { aTest: null } ]
+console.log(data); // [ { aTest: null } ]
 ```
 
 ### Custom Transform Functions
 
 To specify your own transformation functions, you can use the `column`, `value` and `row` options inside of `transform`, each an object possibly including `to` and `from` keys:
 
-* `to`: The function to transform the outgoing query column name to, i.e `SELECT ${ sql('aName') }` to `SELECT a_name` when using `postgres.toCamel`.
-* `from`: The function to transform the incoming query result column name to, see example below.
+- `to`: The function to transform the outgoing query column name to, i.e `SELECT ${ sql('aName') }` to `SELECT a_name` when using `postgres.toCamel`.
+- `from`: The function to transform the incoming query result column name to, see example below.
 
 > Both parameters are optional, if not provided, the default transformation function will be used.
 
@@ -183,8 +184,12 @@ To specify your own transformation functions, you can use the `column`, `value` 
 // Implement your own functions, look at postgres.toCamel, etc
 // as a reference:
 // toCamel and the others in types.js
-function transformColumnToDatabase() { /* ... */ }
-function transformColumnFromDatabase() { /* ... */ }
+function transformColumnToDatabase() {
+  /* ... */
+}
+function transformColumnFromDatabase() {
+  /* ... */
+}
 
 const sql = postgres({
   transform: {
@@ -192,10 +197,10 @@ const sql = postgres({
       to: transformColumnToDatabase,
       from: transformColumnFromDatabase,
     },
-    value: { /* ... */ },
-    row: { /* ... */ }
-  }
-})
+    value: {/* ... */},
+    row: {/* ... */},
+  },
+});
 ```
 
 ## Result Array

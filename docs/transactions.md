@@ -9,7 +9,7 @@ Use `sql.begin` to start a new transaction. @boelabs/postgres will reserve a con
 A query that fails in a transaction aborts it, whether the server rejected it or @boelabs/postgres could not build it (an `undefined` value, say), as PostgreSQL does: catching the error does not let the rest commit, and a later `COMMIT` answers `ROLLBACK`. The transaction commits only once its cursors have finished, also those the callback did not await.
 
 ```js
-const [user, account] = await sql.begin(async sql => {
+const [user, account] = await sql.begin(async (sql) => {
   const [user] = await sql`
     insert into users (
       name
@@ -17,19 +17,19 @@ const [user, account] = await sql.begin(async sql => {
       'Murray'
     )
     returning *
-  `
+  `;
 
   const [account] = await sql`
     insert into accounts (
       user_id
     ) values (
-      ${ user.user_id }
+      ${user.user_id}
     )
     returning *
-  `
+  `;
 
-  return [user, account]
-})
+  return [user, account];
+});
 ```
 
 Do note that you can often achieve the same result using [`WITH` queries (Common Table Expressions)](https://www.postgresql.org/docs/current/queries-with.html) instead of using transactions.
@@ -37,60 +37,65 @@ Do note that you can often achieve the same result using [`WITH` queries (Common
 It's also possible to pipeline the requests in a transaction if needed by returning an array with queries from the callback function like this:
 
 ```js
-const result = await sql.begin(sql => [
+const result = await sql.begin((sql) => [
   sql`update ...`,
   sql`update ...`,
-  sql`insert ...`
-])
+  sql`insert ...`,
+]);
 ```
 
 Queries that are not awaited one by one are pipelined anywhere in the transaction, so `Promise.all` pipelines a group of them between other queries. They run in the order they were made, so a later query sees what an earlier one in the group did:
 
 ```js
-await sql.begin(async sql => {
-  const [movie] = await sql`select * from movie where name = 'Star Wars'`
+await sql.begin(async (sql) => {
+  const [movie] = await sql`select * from movie where name = 'Star Wars'`;
 
   await Promise.all([
-    sql`insert into movie_actor ...${ movie.id }`,
-    sql`insert into movie_release ...${ movie.id }`
-  ])
+    sql`insert into movie_actor ...${movie.id}`,
+    sql`insert into movie_release ...${movie.id}`,
+  ]);
 
-  await sql`select ...`
-})
+  await sql`select ...`;
+});
 ```
 
 ## SAVEPOINT `await sql.savepoint([name], fn) -> fn()`
 
 ```js
-sql.begin('read write', async sql => {
-  const [user] = await sql`
+sql
+  .begin("read write", async (sql) => {
+    const [user] = await sql`
     insert into users (
       name
     ) values (
       'Murray'
     )
-  `
+  `;
 
-  const [account] = (await sql.savepoint(sql =>
-    sql`
+    const [account] =
+      (await sql
+        .savepoint(
+          (sql) =>
+            sql`
       insert into accounts (
         user_id
       ) values (
-        ${ user.user_id }
+        ${user.user_id}
       )
     `
-  ).catch(err => {
-    // Account could not be created. ROLLBACK SAVEPOINT is called because we caught the rejection.
-  })) || []
+        )
+        .catch((err) => {
+          // Account could not be created. ROLLBACK SAVEPOINT is called because we caught the rejection.
+        })) || [];
 
-  return [user, account]
-})
-.then(([user, account]) => {
-  // great success - COMMIT succeeded
-})
-.catch(() => {
-  // not so good - ROLLBACK was called
-})
+    return [user, account];
+  })
+  .then(([user, account]) => {
+    // great success - COMMIT succeeded
+  })
+  .catch(() => {
+    // not so good - ROLLBACK was called
+  });
 ```
 
 ## Nested `sql.begin`
@@ -99,14 +104,14 @@ Inside a transaction, `sql.begin(fn)` runs `fn` in a savepoint, so code that ope
 
 ```js
 async function transfer(sql, from, to, amount) {
-  return sql.begin(async sql => {
-    await sql`update accounts set balance = balance - ${ amount } where id = ${ from }`
-    await sql`update accounts set balance = balance + ${ amount } where id = ${ to }`
-  })
+  return sql.begin(async (sql) => {
+    await sql`update accounts set balance = balance - ${amount} where id = ${from}`;
+    await sql`update accounts set balance = balance + ${amount} where id = ${to}`;
+  });
 }
 
-await transfer(sql, 1, 2, 10)                 // its own transaction
-await sql.begin(sql => transfer(sql, 1, 2, 10)) // a savepoint in this one
+await transfer(sql, 1, 2, 10); // its own transaction
+await sql.begin((sql) => transfer(sql, 1, 2, 10)); // a savepoint in this one
 ```
 
 ## ROLLBACK `await sql.rollback()`
@@ -114,31 +119,30 @@ await sql.begin(sql => transfer(sql, 1, 2, 10)) // a savepoint in this one
 Rolls back the transaction without throwing, and `sql.begin` resolves with what the callback returns (#500). Called in a savepoint or a nested `sql.begin`, it rolls back only that savepoint, and the outer transaction goes on. The rollback is sent at once, after any queries already made. Queries made after it in the same scope are not sent and reject with `TRANSACTION_ROLLED_BACK`, and so does the `sql.begin` they were made in.
 
 ```js
-const result = await sql.begin(async sql => {
-  const [order] = await sql`insert into orders ${ sql(input) } returning *`
-  if (!await inStock(sql, order))
-    return (await sql.rollback(), { saved: false })
-  return { saved: true, order }
-})
+const result = await sql.begin(async (sql) => {
+  const [order] = await sql`insert into orders ${sql(input)} returning *`;
+  if (!(await inStock(sql, order)))
+    return (await sql.rollback(), { saved: false });
+  return { saved: true, order };
+});
 ```
 
 ## PREPARE TRANSACTION `await sql.prepare([name]) -> fn()`
 
-Indicates that the transactions should be prepared using the [`PREPARE TRANSACTION [NAME]`](https://www.postgresql.org/docs/current/sql-prepare-transaction.html) statement
-instead of being committed.
+Indicates that the transactions should be prepared using the [`PREPARE TRANSACTION [NAME]`](https://www.postgresql.org/docs/current/sql-prepare-transaction.html) statement instead of being committed.
 
 ```js
-sql.begin('read write', async sql => {
+sql.begin("read write", async (sql) => {
   const [user] = await sql`
     insert into users (
       name
     ) values (
       'Murray'
     )
-  `
+  `;
 
-  await sql.prepare('tx1')
-})
+  await sql.prepare("tx1");
+});
 ```
 
 ## Batches
@@ -149,9 +153,9 @@ sql.begin('read write', async sql => {
 
 ```js
 const [, [{ count }]] = await sql.batch([
-  sql`update users set name = ${ name } where id = ${ id }`,
-  sql`select count(*)::int from users`
-])
+  sql`update users set name = ${name} where id = ${id}`,
+  sql`select count(*)::int from users`,
+]);
 ```
 
 Outside a transaction the queries are one implicit transaction, as PostgreSQL makes everything before a Sync: they commit together, and if one fails, none of them is committed and the ones after it are not run. The batch rejects with the error of the query that failed, with its position in `error.index`; the other queries in it reject with a copy marked `skipped`. A query that can not be built or written fails the batch the same way, and nothing of it is committed.
@@ -159,11 +163,11 @@ Outside a transaction the queries are one implicit transaction, as PostgreSQL ma
 ```js
 try {
   await sql.batch([
-    sql`insert into accounts ${ sql(account) }`,
-    sql`insert into audit ${ sql(entry) }`
-  ])
+    sql`insert into accounts ${sql(account)}`,
+    sql`insert into audit ${sql(entry)}`,
+  ]);
 } catch (error) {
-  error.index // -> 1 if the audit insert failed, and the account insert was rolled back
+  error.index; // -> 1 if the audit insert failed, and the account insert was rolled back
 }
 ```
 
@@ -180,9 +184,9 @@ The queries are sent without waiting for each other, so none of them can use ano
 The `reserve` method pulls out a connection from the pool, and returns a client that wraps the single connection. This can be used for running queries on an isolated connection.
 
 ```ts
-const reserved = await sql.reserve()
-await reserved`select * from users`
-await reserved.release()
+const reserved = await sql.reserve();
+await reserved`select * from users`;
+await reserved.release();
 ```
 
 ### `reserved.release()`
@@ -197,15 +201,15 @@ Runs `fn` while this process holds the [session advisory lock](https://www.postg
 
 ```js
 // Every replica migrates on boot: the first one runs the migrations, the others wait and then find nothing to do
-await sql.lock('migrations', () => migrate())
+await sql.lock("migrations", () => migrate());
 ```
 
 The key is an integer, a `bigint` or a string, which the server hashes into one with `hashtextextended`. `fn` gets the `sql` of the connection that holds the lock, for queries that should run in the session that holds it; on a pool of `max: 1` it is the only way to query while holding the lock, as that connection is the pool's only one.
 
 ```js
-await sql.lock(918273645, async locked => {
-  await locked`update jobs set state = 'running' where id = ${ id }`
-})
+await sql.lock(918273645, async (locked) => {
+  await locked`update jobs set state = 'running' where id = ${id}`;
+});
 ```
 
 Options:
@@ -215,10 +219,9 @@ Options:
 
 ```js
 try {
-  await sql.lock('nightly-report', () => report(), { wait: false })
+  await sql.lock("nightly-report", () => report(), { wait: false });
 } catch (error) {
-  if (error.code !== 'LOCK_NOT_AVAILABLE')
-    throw error
+  if (error.code !== "LOCK_NOT_AVAILABLE") throw error;
 }
 ```
 

@@ -1,6 +1,13 @@
-import os from 'os'
-import fs from 'fs'
+import fs from "node:fs";
+import os from "node:os";
 
+import { Identifier, Builder } from "./build.js";
+import { channels, active, start, finish, userName } from "./diagnostics.js";
+import { Errors, PostgresError } from "./errors.js";
+import largeObject from "./large.js";
+import { Pool } from "./pool.js";
+import { Query, CLOSE } from "./query.js";
+import Subscribe from "./subscribe.js";
 import {
   Types,
   Parameter,
@@ -12,728 +19,1135 @@ import {
   kebab,
   fromPascal,
   fromCamel,
-  fromKebab
-} from './types.js'
-
-import { Identifier, Builder } from './build.js'
-import { Query, CLOSE } from './query.js'
-import { Pool } from './pool.js'
-import { Errors, PostgresError } from './errors.js'
-import Subscribe from './subscribe.js'
-import largeObject from './large.js'
-import { channels, active, start, finish, userName } from './diagnostics.js'
-
-Object.assign(Postgres, {
-  PostgresError,
-  toPascal,
-  pascal,
-  toCamel,
-  camel,
-  toKebab,
-  kebab,
-  fromPascal,
-  fromCamel,
   fromKebab,
-  BigInt: {
-    to: 20,
-    from: [20],
-    parse: x => BigInt(x),
-    serialize: x => x.toString()
-  }
-})
+} from "./types.js";
 
-export default Postgres
-export { PostgresError }
+export { PostgresError } from "./errors.js";
 
-function Postgres(a, b) {
-  const options = parseOptions(a, b)
-      , types = options.shared_types || Types(options)
-      , pool = Pool(options, types)
-      , subscribe = options.no_subscribe || Subscribe(Postgres, { ...options, shared_types: types })
-      , listener = Listen(options)
+const noop = () => {
+  // Only the outcome matters, not the value: a rollback resolves with nothing, and the error
+  // of a rollback that failed was seen where it was sent.
+};
 
-  if (types.named && options.fetch_types === false)
-    throw Errors.generic('TYPE_NOT_FOUND', 'Custom types given by name need fetch_types to look them up')
+// A function expression, not an arrow, so that postgres() can still be called with new.
+const Postgres = function Postgres(a, b) {
+  const options = parseOptions(a, b);
+  const types = options.shared_types || Types(options);
+  const pool = Pool(options, types);
+  const subscribe =
+    options.no_subscribe ||
+    Subscribe(Postgres, { ...options, shared_types: types });
+  const listener = Listen(options);
 
-  options.resolve = types.resolve
-  options.parsers = view(types.parsers, types.parser)
-  options.serializers = view(types.serializers, types.serializer)
-
-  const sql = Sql(handler)
-
-  Object.defineProperties(sql, {
-    parameters: { get: () => options.parameters, enumerable: true },
-    stats: { get: () => pool.stats, enumerable: true }
-  })
-
-  Object.assign(sql, {
-    largeObject: largeObject.bind(null, sql),
-    subscribe,
-    CLOSE,
-    END: CLOSE,
-    PostgresError,
-    options,
-    reserve,
-    lock,
-    listen: listener.listen,
-    begin,
-    close,
-    end
-  })
-
-  Symbol.asyncDispose && (sql[Symbol.asyncDispose] = () => end())
-
-  return sql
-
-  function handler(q) {
-    pool.query(q)
+  if (types.named && options.fetch_types === false) {
+    throw Errors.generic(
+      "TYPE_NOT_FOUND",
+      "Custom types given by name need fetch_types to look them up"
+    );
   }
 
-  function Sql(handler) {
-    handler.debug = options.debug
-    handler.options = options
-    handler.cancel = handler.cancel || pool.cancel
+  options.resolve = types.resolve;
+  options.parsers = view(types.parsers, types.parser);
+  options.serializers = view(types.serializers, types.serializer);
 
-    const typed = (value, type) => new Parameter(value, type)
+  const handle = (q) => {
+    pool.query(q);
+  };
 
-    Object.entries(options.types).forEach(([name, type]) => typed[name] = x => new Parameter(x, type.to))
+  const Sql = (handler) => {
+    handler.debug = options.debug;
+    handler.options = options;
+    handler.cancel ||= pool.cancel;
+
+    // oxlint-disable-next-line unicorn/consistent-function-scoping -- one per sql instance: its custom types are added to it below
+    const typed = (value, type) => new Parameter(value, type);
+
+    for (const [name, type] of Object.entries(options.types)) {
+      typed[name] = (x) => new Parameter(x, type.to);
+    }
+
+    const sql = function sql(strings, ...args) {
+      if (strings && Array.isArray(strings.raw)) {
+        return new Query(strings, args, handler);
+      }
+      if (typeof strings === "string" && !args.length) {
+        return new Identifier(
+          options.transform.column.to
+            ? options.transform.column.to(strings)
+            : strings
+        );
+      }
+      return new Builder(strings, args);
+    };
+
+    const unsafe = function unsafe(string, args = [], queryOptions = {}) {
+      let values = args;
+      let settings = queryOptions;
+      if (arguments.length === 2 && !Array.isArray(args)) {
+        settings = args;
+        values = [];
+      }
+      return new Query([string], values, handler, {
+        prepare: false,
+        ...settings,
+        simple: "simple" in settings ? settings.simple : values.length === 0,
+      });
+    };
+
+    const batch = (queries) => {
+      if (!Array.isArray(queries)) {
+        throw Errors.generic(
+          "BATCH_NOT_ARRAY",
+          "sql.batch takes an array of queries"
+        );
+      }
+
+      // A hole in the array is passed over, as forEach did; the pool fails it when it builds it.
+      for (const [i, x] of queries.entries()) {
+        if (i in queries) {
+          if (!(x instanceof Query)) {
+            throw Errors.generic(
+              "BATCH_NOT_QUERY",
+              `Item ${i} of the batch is not a query`
+            );
+          }
+          if (x.executed) {
+            throw Errors.generic(
+              "BATCH_EXECUTED",
+              `Item ${i} of the batch has already run`
+            );
+          }
+          if (
+            x.cursorFn ||
+            x.cursorRows ||
+            x.streaming ||
+            x.forEachFn ||
+            x.onlyDescribe
+          ) {
+            throw Errors.generic(
+              "BATCH_UNSUPPORTED",
+              `Item ${i} of the batch is a cursor, stream, forEach or describe`
+            );
+          }
+        }
+      }
+
+      const q = new Query([], [], handler, {});
+      q.parts = queries;
+      for (const [i, x] of queries.entries()) {
+        if (i in queries) {
+          x.executed = true;
+          x.cancel = () => q.cancel();
+        }
+      }
+      return q;
+    };
+
+    const notify = async (channel, payload) =>
+      await sql`select pg_notify(${channel}, ${`${payload}`})`;
+
+    const file = function file(path, args = [], queryOptions = {}) {
+      let values = args;
+      let settings = queryOptions;
+      if (arguments.length === 2 && !Array.isArray(args)) {
+        settings = args;
+        values = [];
+      }
+      const fileHandler = (query) =>
+        fs.readFile(path, "utf-8", (err, string) => {
+          if (err) {
+            return query.reject(err);
+          }
+          query.strings = [string];
+          handler(query);
+        });
+      Object.assign(fileHandler, handler);
+      return new Query([], values, fileHandler, {
+        ...settings,
+        simple: "simple" in settings ? settings.simple : values.length === 0,
+      });
+    };
 
     Object.assign(sql, {
-      types: typed,
-      typed,
-      unsafe,
-      batch,
-      notify,
       array,
+      batch,
+      file,
       json,
-      file
-    })
+      notify,
+      typed,
+      types: typed,
+      unsafe,
+    });
 
-    return sql
+    return sql;
+  };
 
-    function sql(strings, ...args) {
-      return strings && Array.isArray(strings.raw)
-        ? new Query(strings, args, handler)
-        : typeof strings === 'string' && !args.length
-          ? new Identifier(options.transform.column.to ? options.transform.column.to(strings) : strings)
-          : new Builder(strings, args)
+  const reserve = async () => {
+    const lease = await pool.lease("reserve");
+    const reserved = Sql(
+      Object.assign((q) => lease.send(q), { cancel: pool.cancel })
+    );
+
+    reserved.release = () => lease.release();
+    if (Symbol.dispose) {
+      reserved[Symbol.dispose] = reserved.release;
     }
-
-    function unsafe(string, args = [], options = {}) {
-      arguments.length === 2 && !Array.isArray(args) && (options = args, args = [])
-      return new Query([string], args, handler, {
-        prepare: false,
-        ...options,
-        simple: 'simple' in options ? options.simple : args.length === 0
-      })
+    if (Symbol.asyncDispose) {
+      reserved[Symbol.asyncDispose] = async () => reserved.release();
     }
-
-    function batch(queries) {
-      if (!Array.isArray(queries))
-        throw Errors.generic('BATCH_NOT_ARRAY', 'sql.batch takes an array of queries')
-
-      queries.forEach((x, i) => {
-        if (!(x instanceof Query))
-          throw Errors.generic('BATCH_NOT_QUERY', 'Item ' + i + ' of the batch is not a query')
-        if (x.executed)
-          throw Errors.generic('BATCH_EXECUTED', 'Item ' + i + ' of the batch has already run')
-        if (x.cursorFn || x.cursorRows || x.streaming || x.forEachFn || x.onlyDescribe)
-          throw Errors.generic('BATCH_UNSUPPORTED', 'Item ' + i + ' of the batch is a cursor, stream, forEach or describe')
-      })
-
-      const q = new Query([], [], handler, {})
-      q.parts = queries
-      queries.forEach(x => (x.executed = true, x.cancel = () => q.cancel()))
-      return q
-    }
-
-    async function notify(channel, payload) {
-      return await sql`select pg_notify(${ channel }, ${ '' + payload })`
-    }
-
-    function file(path, args = [], options = {}) {
-      arguments.length === 2 && !Array.isArray(args) && (options = args, args = [])
-      const fileHandler = query => fs.readFile(path, 'utf8', (err, string) => {
-        if (err)
-          return query.reject(err)
-        query.strings = [string]
-        handler(query)
-      })
-      Object.assign(fileHandler, handler)
-      return new Query([], args, fileHandler, {
-        ...options,
-        simple: 'simple' in options ? options.simple : args.length === 0
-      })
-    }
-  }
-
-  function json(x) {
-    return new Parameter(x, 3802)
-  }
-
-  function array() {
-    throw Errors.generic('ARRAY_REMOVED', 'sql.array() is removed in v4, pass the array as it is')
-  }
-
-  async function reserve() {
-    const lease = await pool.lease('reserve')
-        , reserved = Sql(Object.assign(q => lease.send(q), { cancel: pool.cancel }))
-
-    reserved.release = () => lease.release()
-    Symbol.dispose && (reserved[Symbol.dispose] = reserved.release)
-    Symbol.asyncDispose && (reserved[Symbol.asyncDispose] = async() => reserved.release())
-    return reserved
-  }
+    return reserved;
+  };
 
   // Runs fn while this process holds a session advisory lock, on a connection kept for the lock alone,
   // so that the unlock reaches the session that locked. fn gets that connection's sql. The lock is
   // let go when fn settles, and goes with the connection should that be lost first.
-  async function lock(key, fn, { wait = true, signal } = {}) {
-    if (typeof fn !== 'function')
-      throw Errors.generic('LOCK_NO_FUNCTION', 'sql.lock takes a key and a function to run while it holds the lock')
+  const lock = async (key, fn, { wait = true, signal } = {}) => {
+    if (typeof fn !== "function") {
+      throw Errors.generic(
+        "LOCK_NO_FUNCTION",
+        "sql.lock takes a key and a function to run while it holds the lock"
+      );
+    }
 
-    const id = lockKey(key)
-        , lease = await pool.lease('lock')
-        , held = Sql(Object.assign(q => lease.send(q), { cancel: pool.cancel }))
+    const id = lockKey(key);
+    const lease = await pool.lease("lock");
+    const held = Sql(
+      Object.assign((q) => lease.send(q), { cancel: pool.cancel })
+    );
 
-    let acquired = false
+    let acquired = false;
     try {
       const take = wait
-        ? held`select true as acquired from pg_advisory_lock(${ id })`
-        : held`select pg_try_advisory_lock(${ id }) as acquired`
-      signal && take.signal(signal)
-      acquired = (await take)[0].acquired
-      if (!acquired)
-        throw Errors.generic('LOCK_NOT_AVAILABLE', 'The advisory lock ' + key + ' is held by another session')
-      return await fn(held)
+        ? held`select true as acquired from pg_advisory_lock(${id})`
+        : held`select pg_try_advisory_lock(${id}) as acquired`;
+      if (signal) {
+        take.signal(signal);
+      }
+      const [row] = await take;
+      ({ acquired } = row);
+      if (!acquired) {
+        throw Errors.generic(
+          "LOCK_NOT_AVAILABLE",
+          `The advisory lock ${key} is held by another session`
+        );
+      }
+      return await fn(held);
     } finally {
-      const unlocked = acquired && await held`select pg_advisory_unlock(${ id }) as x`.then(([x]) => x.x, () => false)
+      const unlocked =
+        acquired &&
+        (await held`select pg_advisory_unlock(${id}) as x`.then(
+          ([x]) => x.x,
+          () => false
+        ));
       // A connection that may still hold the lock never goes back to the pool.
-      acquired && !unlocked && lease.connection.close()
-      lease.release()
+      if (acquired && !unlocked) {
+        lease.connection.close();
+      }
+      lease.release();
     }
-  }
+  };
 
   // An integer or bigint is the key itself; the server hashes a string into one.
-  function lockKey(x) {
-    if (typeof x === 'bigint' || (typeof x === 'number' && Number.isSafeInteger(x)))
-      return sql`${ String(x) }::int8`
-    if (typeof x === 'string' && x)
-      return sql`hashtextextended(${ x }, 0)`
-    throw Errors.generic('LOCK_KEY', 'An advisory lock key is an integer, a bigint or a non-empty string')
-  }
+  const lockKey = (x) => {
+    if (
+      typeof x === "bigint" ||
+      (typeof x === "number" && Number.isSafeInteger(x))
+    ) {
+      return instance`${String(x)}::int8`;
+    }
+    if (typeof x === "string" && x) {
+      return instance`hashtextextended(${x}, 0)`;
+    }
+    throw Errors.generic(
+      "LOCK_KEY",
+      "An advisory lock key is an integer, a bigint or a non-empty string"
+    );
+  };
 
-  function begin(mode, fn) {
-    !fn && (fn = mode, mode = '')
-    if (!active(channels.transaction))
-      return transaction(mode, fn, null)
+  const begin = (mode, fn) => {
+    const body = fn || mode;
+    const level = fn ? mode : "";
+    if (!active(channels.transaction)) {
+      return transaction(level, body, null);
+    }
 
     const context = {
-      mode,
-      database: options.database,
-      user: userName(options),
       connection: null,
+      database: options.database,
       host: null,
+      mode: level,
+      outcome: null,
       port: null,
-      outcome: null
-    }
-    let promise
-    start(channels.transaction, context, () => promise = transaction(mode, fn, context))
+      user: userName(options),
+    };
+    let promise;
+    start(channels.transaction, context, () => {
+      promise = transaction(level, body, context);
+      return promise;
+    });
 
     return promise.then(
-      result => (finish(channels.transaction, context, null, result), result),
-      error => {
-        finish(channels.transaction, context, error)
-        throw error
+      (result) => {
+        finish(channels.transaction, context, null, result);
+        return result;
+      },
+      (transactionError) => {
+        finish(channels.transaction, context, transactionError);
+        throw transactionError;
       }
-    )
-  }
+    );
+  };
 
-  async function transaction(mode, fn, context) {
-    const lease = await pool.lease('transaction')
+  const transaction = async (mode, fn, context) => {
+    const lease = await pool.lease("transaction");
 
-    let savepoints = 0
-      , prepare = null
+    let savepoints = 0;
+    let prepare = null;
 
-    context && Object.assign(context, {
-      connection: lease.connection.id,
-      host: lease.connection.host,
-      port: lease.connection.port
-    })
-
-    try {
-      await control(lease, 'begin ' + mode.replace(/[^a-z ]/ig, ''))
-      const done = scope(fn)
-      done.catch(() => {})
-      return await Promise.race([done, lease.closed])
-    } finally {
-      lease.release()
+    if (context) {
+      Object.assign(context, {
+        connection: lease.connection.id,
+        host: lease.connection.host,
+        port: lease.connection.port,
+      });
     }
 
-    async function scope(fn, name, inside, above = () => false) {
-      let uncaught
-        , result
-        , rolled = null
-        , after = null
+    // oxlint-disable-next-line complexity -- one transaction or savepoint from start to end; parts of it in helpers would await on other ticks
+    const scope = async (body, name, inside, above = () => false) => {
+      let uncaught;
+      let result;
+      let rolled = null;
+      let after = null;
 
-      if (above())
-        throw rolledBack()
-
-      const stopped = () => !!rolled || above()
-          , scoped = Sql(Object.assign(q => {
-            if (stopped())
-              return q.reject(after || (after = rolledBack()))
-            q.catch(e => uncaught || (uncaught = e))
-            lease.send(q)
-          }, { cancel: pool.cancel }))
-
-      scoped.savepoint = savepoint
-      scoped.begin = nested
-      scoped.rollback = () => rolled || (rolled = control(lease, name ? 'rollback to ' + identifier(name) : 'rollback').then(() => {}))
-      scoped.prepare = x => {
-        if (inside)
-          throw Errors.generic('NESTED_TRANSACTION_MODE', 'A nested transaction can not be prepared, only the outermost one')
-        prepare = x.replace(/[^a-z0-9$\-_. ]/gi, '')
+      if (above()) {
+        throw rolledBack();
       }
 
-      name && await control(lease, 'savepoint ' + identifier(name))
+      const stopped = () => !!rolled || above();
+      const scoped = Sql(
+        Object.assign(
+          (q) => {
+            if (stopped()) {
+              return q.reject((after ||= rolledBack()));
+            }
+            q.catch((queryError) => (uncaught ||= queryError));
+            lease.send(q);
+          },
+          { cancel: pool.cancel }
+        )
+      );
+
+      const savepoint = (...args) => {
+        const [label, run] = args;
+        if (label && Array.isArray(label.raw)) {
+          return savepoint((tx) => tx(...args));
+        }
+
+        const named = args.length === 1 ? null : label;
+        const block = args.length === 1 ? label : run;
+        const id = savepoints;
+        savepoints += 1;
+        return scope(
+          block,
+          `s${id}${named ? `_${named}` : ""}`,
+          false,
+          stopped
+        );
+      };
+
+      const nested = async (inner, run) => {
+        const block = run || inner;
+        const level = run ? inner : "";
+
+        if (normal(level) && normal(level) !== normal(mode)) {
+          throw Errors.generic(
+            "NESTED_TRANSACTION_MODE",
+            "A nested transaction runs in a savepoint, which can not change the transaction mode"
+          );
+        }
+
+        const id = savepoints;
+        savepoints += 1;
+        return scope(block, `s${id}`, true, stopped);
+      };
+
+      scoped.savepoint = savepoint;
+      scoped.begin = nested;
+      scoped.rollback = () =>
+        (rolled ||= control(lease, rollbackOf(name)).then(noop));
+      scoped.prepare = (x) => {
+        if (inside) {
+          throw Errors.generic(
+            "NESTED_TRANSACTION_MODE",
+            "A nested transaction can not be prepared, only the outermost one"
+          );
+        }
+        prepare = x.replaceAll(/[^A-Za-z0-9$\-_. ]/gu, "");
+      };
+
+      if (name) {
+        await control(lease, `savepoint ${identifier(name)}`);
+      }
       try {
-        result = await new Promise((resolve, reject) => {
-          const x = fn(scoped)
-          Promise.resolve(Array.isArray(x) ? Promise.all(x) : x).then(resolve, reject)
-        })
-        if (uncaught && !stopped())
-          throw uncaught
-        if (lease.connection.closed)
-          throw lease.error || lease.connection.closed
+        const { promise, resolve, reject } = Promise.withResolvers();
+        // What this throws rejects the promise, as from a promise executor.
+        try {
+          const x = body(scoped);
+          Promise.resolve(Array.isArray(x) ? Promise.all(x) : x).then(
+            resolve,
+            reject
+          );
+        } catch (error) {
+          reject(error);
+        }
+        result = await promise;
+        if (uncaught && !stopped()) {
+          throw uncaught;
+        }
+        if (lease.connection.closed) {
+          throw lease.error || lease.connection.closed;
+        }
       } catch (error) {
-        context && !name && (context.outcome = 'rollback')
-        stopped()
-          ? rolled && await rolled.catch(() => {})
-          : lease.connection.closed || await control(lease, name ? 'rollback to ' + identifier(name) : 'rollback')
-        throw error instanceof PostgresError && error.code === '25P02' && uncaught || error
+        if (context && !name) {
+          context.outcome = "rollback";
+        }
+        if (stopped()) {
+          if (rolled) {
+            await rolled.catch(noop);
+          }
+        } else if (!lease.connection.closed) {
+          await control(lease, rollbackOf(name));
+        }
+        throw (
+          (error instanceof PostgresError &&
+            error.code === "25P02" &&
+            uncaught) ||
+          error
+        );
       }
 
       if (stopped()) {
-        rolled && await rolled
-        context && !name && (context.outcome = 'rollback')
+        if (rolled) {
+          await rolled;
+        }
+        if (context && !name) {
+          context.outcome = "rollback";
+        }
 
-        if (after)
-          throw after
+        if (after) {
+          throw after;
+        }
 
-        return result
+        return result;
       }
 
       if (!name) {
-        const done = await control(lease, prepare ? 'prepare transaction \'' + prepare.replace(/'/g, '\'\'') + '\'' : 'commit')
-        context && (context.outcome = prepare ? 'prepare' : done.command === 'COMMIT' ? 'commit' : 'rollback')
+        const done = await control(
+          lease,
+          prepare
+            ? `prepare transaction '${prepare.replaceAll("'", "''")}'`
+            : "commit"
+        );
+        if (context) {
+          context.outcome = outcome(prepare, done);
+        }
 
-        if (!prepare && done.command !== 'COMMIT')
-          throw Errors.generic('TRANSACTION_ROLLED_BACK', 'The server rolled back the transaction instead of committing it')
+        if (!prepare && done.command !== "COMMIT") {
+          throw Errors.generic(
+            "TRANSACTION_ROLLED_BACK",
+            "The server rolled back the transaction instead of committing it"
+          );
+        }
       }
 
-      return result
+      return result;
+    };
 
-      function savepoint(name, fn) {
-        if (name && Array.isArray(name.raw))
-          return savepoint(sql => sql.apply(sql, arguments))
-
-        arguments.length === 1 && (fn = name, name = null)
-        return scope(fn, 's' + savepoints++ + (name ? '_' + name : ''), false, stopped)
-      }
-
-      async function nested(inner, fn) {
-        !fn && (fn = inner, inner = '')
-
-        if (normal(inner) && normal(inner) !== normal(mode))
-          throw Errors.generic('NESTED_TRANSACTION_MODE', 'A nested transaction runs in a savepoint, which can not change the transaction mode')
-
-        return scope(fn, 's' + savepoints++, true, stopped)
-      }
+    try {
+      await control(lease, `begin ${mode.replaceAll(/[^A-Za-z ]/gu, "")}`);
+      const done = scope(fn);
+      done.catch(noop);
+      return await Promise.race([done, lease.closed]);
+    } finally {
+      lease.release();
     }
-  }
+  };
 
-  function rolledBack() {
-    return Errors.generic('TRANSACTION_ROLLED_BACK', 'The query was not sent, the transaction was rolled back with sql.rollback()')
-  }
+  const control = (lease, text) => {
+    const q = new Query(
+      [text],
+      [],
+      Object.assign((query) => lease.send(query), {
+        cancel: pool.cancel,
+        options,
+      }),
+      { simple: true }
+    );
+    return q.execute();
+  };
 
-  function normal(x) {
-    return (x || '').toLowerCase().replace(/[^a-z ]/g, '').replace(/\s+/g, ' ').trim()
-  }
-
-  function identifier(x) {
-    return '"' + x.replace(/"/g, '""') + '"'
-  }
-
-  function control(lease, text) {
-    const q = new Query([text], [], Object.assign(q => lease.send(q), { options, cancel: pool.cancel }), { simple: true })
-    return q.execute()
-  }
-
-  async function end(options) {
+  const end = async (settings) => {
     await Promise.all([
       listener.end(),
-      subscribe.sql ? subscribe.sql.end({ timeout: 0 }) : null
-    ])
-    return pool.end(options)
+      subscribe.sql ? subscribe.sql.end({ timeout: 0 }) : null,
+    ]);
+    return pool.end(settings);
+  };
+
+  const close = () => pool.close();
+
+  const instance = Sql(handle);
+
+  Object.defineProperties(instance, {
+    parameters: { enumerable: true, get: () => options.parameters },
+    stats: { enumerable: true, get: () => pool.stats },
+  });
+
+  Object.assign(instance, {
+    CLOSE,
+    END: CLOSE,
+    PostgresError,
+    begin,
+    close,
+    end,
+    largeObject: largeObject.bind(null, instance),
+    listen: listener.listen,
+    lock,
+    options,
+    reserve,
+    subscribe,
+  });
+
+  if (Symbol.asyncDispose) {
+    instance[Symbol.asyncDispose] = () => end();
   }
 
-  function close() {
-    return pool.close()
+  return instance;
+};
+
+Object.assign(Postgres, {
+  BigInt: {
+    from: [20],
+    parse: BigInt,
+    serialize: (x) => x.toString(),
+    to: 20,
+  },
+  PostgresError,
+  camel,
+  fromCamel,
+  fromKebab,
+  fromPascal,
+  kebab,
+  pascal,
+  toCamel,
+  toKebab,
+  toPascal,
+});
+
+export default Postgres;
+
+const json = (x) => new Parameter(x, 3802);
+
+const array = () => {
+  throw Errors.generic(
+    "ARRAY_REMOVED",
+    "sql.array() is removed in v4, pass the array as it is"
+  );
+};
+
+const rolledBack = () =>
+  Errors.generic(
+    "TRANSACTION_ROLLED_BACK",
+    "The query was not sent, the transaction was rolled back with sql.rollback()"
+  );
+
+// What a commit or prepare ended in, for the diagnostics context.
+const outcome = (prepared, done) => {
+  if (prepared) {
+    return "prepare";
   }
-}
+  if (done.command === "COMMIT") {
+    return "commit";
+  }
+  return "rollback";
+};
 
-function Listen(options) {
-  const channels = new Map()
-  let sql = null
-    , closing = null
+const normal = (x) =>
+  (x || "")
+    .toLowerCase()
+    .replaceAll(/[^a-z ]/gu, "")
+    .replaceAll(/\s+/gu, " ")
+    .trim();
 
-  return {
-    listen,
-    end: () => {
-      channels.forEach(channel => channel.timer && options.timers.clearTimeout(channel.timer))
-      return closing || (sql ? (closing = sql.end({ timeout: 0 })) : Promise.resolve())
+const identifier = (x) => `"${x.replaceAll('"', '""')}"`;
+
+// The statement that undoes a scope: all of the transaction, or back to its savepoint.
+const rollbackOf = (name) =>
+  name ? `rollback to ${identifier(name)}` : "rollback";
+
+// A channel listened to again after its connection was lost.
+const relistened = (channel, result) => {
+  Object.assign(channel.state, result.state);
+  for (const l of channel.listeners) {
+    if (l.onlisten) {
+      l.onlisten();
     }
   }
+};
 
-  function connection() {
-    return sql || (sql = Postgres({
+const Listen = (options) => {
+  const subscriptions = new Map();
+  let sql = null;
+  let closing = null;
+
+  const connection = () =>
+    (sql ||= Postgres({
       ...options,
-      query_timeout: 0,
-      max: 1,
-      idle_timeout: null,
-      max_lifetime: null,
       fetch_types: false,
+      idle_timeout: null,
+      max: 1,
+      max_lifetime: null,
       no_subscribe: true,
       onclose() {
-        if (closing)
-          return
+        if (closing) {
+          return;
+        }
 
-        channels.forEach((channel, name) => relisten(channel, name))
+        for (const [name, channel] of subscriptions) {
+          relisten(channel, name);
+        }
       },
       onnotify(channel, payload) {
-        channels.has(channel) && [...channels.get(channel).listeners].forEach(l => l.fn(payload))
+        if (subscriptions.has(channel)) {
+          const listeners = [...subscriptions.get(channel).listeners];
+          for (const l of listeners) {
+            l.fn(payload);
+          }
+        }
+      },
+      query_timeout: 0,
+    }));
+
+  const relisten = (channel, name, retries = 0) => {
+    channel.timer = null;
+    channel.result = listenTo(name);
+    channel.result.then(
+      (result) => relistened(channel, result),
+      () => {
+        if (closing || subscriptions.get(name) !== channel) {
+          return;
+        }
+
+        const attempt = retries + 1;
+        const seconds =
+          typeof options.backoff === "function"
+            ? options.backoff(attempt)
+            : options.backoff;
+        channel.timer = options.timers.setTimeout(() => {
+          if (!closing && subscriptions.get(name) === channel) {
+            relisten(channel, name, attempt);
+          }
+        }, seconds * 1000);
       }
-    }))
-  }
+    );
+  };
 
-  function relisten(channel, name, retries = 0) {
-    channel.timer = null
-    channel.result = start(name)
-    channel.result.then(result => {
-      Object.assign(channel.state, result.state)
-      channel.listeners.forEach(l => l.onlisten && l.onlisten())
-    }, () => {
-      if (closing || channels.get(name) !== channel)
-        return
+  const listenTo = (name) => {
+    const x = connection();
+    return x`listen ${x.unsafe(`"${name.replaceAll('"', '""')}"`)}`;
+  };
 
-      retries++
-      const seconds = typeof options.backoff === 'function' ? options.backoff(retries) : options.backoff
-      channel.timer = options.timers.setTimeout(() => !closing && channels.get(name) === channel && relisten(channel, name, retries), seconds * 1000)
-    })
-  }
+  const listen = async (name, fn, onlisten) => {
+    const listener = { fn, onlisten };
+    if (!subscriptions.has(name)) {
+      subscriptions.set(name, {
+        listeners: new Set(),
+        result: listenTo(name),
+        state: {},
+      });
+    }
 
-  function start(name) {
-    const x = connection()
-    return x`listen ${ x.unsafe('"' + name.replace(/"/g, '""') + '"') }`
-  }
-
-  async function listen(name, fn, onlisten) {
-    const listener = { fn, onlisten }
-    if (!channels.has(name))
-      channels.set(name, { listeners: new Set(), result: start(name), state: {} })
-
-    const channel = channels.get(name)
-    channel.listeners.add(listener)
-    let result
+    const channel = subscriptions.get(name);
+    channel.listeners.add(listener);
+    let result;
     try {
-      result = await channel.result
+      result = await channel.result;
     } catch (error) {
-      channel.listeners.delete(listener)
-      channel.listeners.size || channels.delete(name)
-      throw error
-    }
-    Object.assign(channel.state, result.state)
-    listener.onlisten && listener.onlisten()
-
-    return { state: channel.state, unlisten }
-
-    async function unlisten() {
-      if (!channel.listeners.delete(listener) || channel.listeners.size)
-        return
-
-      channels.get(name) === channel && channels.delete(name)
-      const x = sql
-
-      if (closing || !x)
-        return
-
-      await x`unlisten ${ x.unsafe('"' + name.replace(/"/g, '""') + '"') }`.catch(e => {
-        if (!/^CONNECTION_/.test(e.code))
-          throw e
-      })
-      if (channels.size === 0 && sql === x) {
-        sql = null
-        await x.end()
+      channel.listeners.delete(listener);
+      if (!channel.listeners.size) {
+        subscriptions.delete(name);
       }
+      throw error;
     }
+    Object.assign(channel.state, result.state);
+    if (listener.onlisten) {
+      listener.onlisten();
+    }
+
+    const unlisten = async () => {
+      if (!channel.listeners.delete(listener) || channel.listeners.size) {
+        return;
+      }
+
+      if (subscriptions.get(name) === channel) {
+        subscriptions.delete(name);
+      }
+      const x = sql;
+
+      if (closing || !x) {
+        return;
+      }
+
+      await x`unlisten ${x.unsafe(`"${name.replaceAll('"', '""')}"`)}`.catch(
+        (error) => {
+          if (!error.code.startsWith("CONNECTION_")) {
+            throw error;
+          }
+        }
+      );
+      if (subscriptions.size === 0 && sql === x) {
+        sql = null;
+        await x.end();
+      }
+    };
+
+    return { state: channel.state, unlisten };
+  };
+
+  return {
+    end: () => {
+      for (const channel of subscriptions.values()) {
+        if (channel.timer) {
+          options.timers.clearTimeout(channel.timer);
+        }
+      }
+      return (
+        closing ||
+        (sql ? (closing = sql.end({ timeout: 0 })) : Promise.resolve())
+      );
+    },
+    listen,
+  };
+};
+
+const parseOptions = (a, b) => {
+  if (a && a.shared) {
+    return a;
   }
-}
 
-function parseOptions(a, b) {
-  if (a && a.shared)
-    return a
+  const { env } = process;
+  const o = given(a, b);
+  const url = parseUrl(a);
+  const query = params(url.url.searchParams);
+  const targets = hosts(o, query, url, env);
+  const port = portOf(o, query, env);
+  const user = userOf(o, url, env);
 
-  const env = process.env
-      , o = (!a || typeof a === 'string' ? b : a) || {}
-      , url = parseUrl(a)
-      , query = [...url.url.searchParams].reduce((a, [b, c]) => (a[b] = c, a), {})
-      , targets = hosts(o, query, url, env)
-      , port = o.port || query.port || env.PGPORT || 5432
-      , user = o.user || o.username || url.url.username || env.PGUSERNAME || env.PGUSER || osUsername()
+  if (o.no_prepare) {
+    o.prepare = false;
+  }
+  if (query.sslmode) {
+    query.ssl = query.sslmode;
+    delete query.sslmode;
+  }
+  if ("timeout" in o) {
+    console.log("The timeout option is deprecated, use idle_timeout instead");
+    o.idle_timeout = o.timeout;
+  }
+  if (!("ssl" in query) && env.PGSSLMODE) {
+    query.ssl = env.PGSSLMODE;
+  }
 
-  o.no_prepare && (o.prepare = false)
-  query.sslmode && (query.ssl = query.sslmode, delete query.sslmode)
-  'timeout' in o && (console.log('The timeout option is deprecated, use idle_timeout instead'), o.idle_timeout = o.timeout) // eslint-disable-line
-  'ssl' in query || !env.PGSSLMODE || (query.ssl = env.PGSSLMODE)
-
-  const ints = [
-    'idle_timeout', 'connect_timeout', 'max_lifetime', 'max_pipeline', 'backoff', 'keep_alive', 'min',
-    'queue_timeout', 'query_timeout', 'cancel_timeout'
-  ]
+  const ints = new Set([
+    "idle_timeout",
+    "connect_timeout",
+    "max_lifetime",
+    "max_pipeline",
+    "backoff",
+    "keep_alive",
+    "min",
+    "queue_timeout",
+    "query_timeout",
+    "cancel_timeout",
+  ]);
   const defaults = {
-    max             : globalThis.Cloudflare ? 3 : 10,
-    min             : 0,
-    ssl             : false,
-    sslnegotiation  : null,
-    channel_binding : 'prefer',
-    idle_timeout    : null,
-    connect_timeout : 30,
-    queue_timeout   : 0,
-    query_timeout   : 0,
-    cancel_timeout  : 5,
-    max_lifetime    : max_lifetime,
-    max_pipeline    : 100,
-    scheduler       : true,
-    backoff         : backoff,
-    keep_alive      : 60,
-    prepare         : true,
-    debug           : false,
-    fetch_types     : true,
-    infer           : false,
-    publications    : 'alltables',
-    slot            : null,
-    target_session_attrs: null
-  }
+    backoff,
+    cancel_timeout: 5,
+    channel_binding: "prefer",
+    connect_timeout: 30,
+    debug: false,
+    fetch_types: true,
+    idle_timeout: null,
+    infer: false,
+    keep_alive: 60,
+    max: globalThis.Cloudflare ? 3 : 10,
+    max_lifetime,
+    max_pipeline: 100,
+    min: 0,
+    prepare: true,
+    publications: "alltables",
+    query_timeout: 0,
+    queue_timeout: 0,
+    scheduler: true,
+    slot: null,
+    ssl: false,
+    sslnegotiation: null,
+    target_session_attrs: null,
+  };
 
   const options = {
-    host            : targets.map(x => x[0]),
-    port            : Array.isArray(port) ? port : targets.map(x => o.port || query.port ? +port : x[1] || +port),
-    path            : o.path || targets[0][0].indexOf('/') > -1 && targets[0][0] + '/.s.PGSQL.' + (targets[0][1] || port),
-    database        : o.database || o.db || (url.url.pathname || '').slice(1) || env.PGDATABASE || (typeof user === 'function' ? null : user),
-    user            : user,
-    pass            : o.pass || o.password || url.url.password || env.PGPASSWORD || '',
-    ...Object.entries(defaults).reduce(
-      (acc, [k, d]) => {
-        const value = k in o && o[k] !== undefined ? o[k] : k in query
-          ? (query[k] === 'disable' || query[k] === 'false' ? false : query[k])
-          : env['PG' + k.toUpperCase()] || d
-        acc[k] = typeof value === 'string' && ints.includes(k)
-          ? +value
-          : value
-        return acc
-      },
-      {}
-    ),
-    connection      : {
-      application_name: env.PGAPPNAME || '@boelabs/postgres',
+    database: databaseOf(o, url, env, user),
+    host: targets.map((x) => x[0]),
+    pass: passOf(o, url, env),
+    path: pathOf(o, targets, port),
+    port: Array.isArray(port)
+      ? port
+      : targets.map((x) => (o.port || query.port ? +port : x[1] || +port)),
+    user,
+    ...settings(defaults, ints, o, query, env),
+    channel_binding: binding(o, url.url, env),
+    connection: {
+      application_name: env.PGAPPNAME || "@boelabs/postgres",
       ...o.connection,
-      ...Object.entries(query).reduce((acc, [k, v]) => (k in defaults || clientOnly.has(k) || (acc[k] = v), acc), {})
+      ...runtime(query, defaults),
     },
-    sslrootcert     : o.sslrootcert || query.sslrootcert || env.PGSSLROOTCERT || null,
-    sslcert         : o.sslcert || query.sslcert || env.PGSSLCERT || null,
-    sslkey          : o.sslkey || query.sslkey || env.PGSSLKEY || null,
-    sslpassword     : o.sslpassword || query.sslpassword || null,
-    types           : o.types || {},
+    eager_types: !!o.eager_types,
+    no_subscribe: o.no_subscribe,
+    onclose: o.onclose,
+    onnotice: o.onnotice,
+    onnotify: o.onnotify,
+    onparameter: o.onparameter,
+    onread: o.onread !== false,
+    open: o.open,
+    parameters: {},
+    passfile: passfile(env),
+    shared: { retries: 0 },
+    shared_types: o.shared_types,
+    socket: o.socket,
+    sslcert: sslFile(o, query, env, "sslcert", "PGSSLCERT"),
+    sslkey: sslFile(o, query, env, "sslkey", "PGSSLKEY"),
+    sslpassword: o.sslpassword || query.sslpassword || null,
+    sslrootcert: sslFile(o, query, env, "sslrootcert", "PGSSLROOTCERT"),
     target_session_attrs: tsa(o, url.url, env),
-    channel_binding : binding(o, url.url, env),
-    onnotice        : o.onnotice,
-    onnotify        : o.onnotify,
-    onclose         : o.onclose,
-    onparameter     : o.onparameter,
-    socket          : o.socket,
-    onread          : o.onread !== false,
-    open            : o.open,
-    no_subscribe    : o.no_subscribe,
-    unref_sockets   : !!o.unref_sockets,
-    passfile        : passfile(env),
-    shared_types    : o.shared_types,
-    eager_types     : !!o.eager_types,
-    transform       : parseTransform(o.transform || { undefined: undefined }),
-    parameters      : {},
-    shared          : { retries: 0 },
-    timers          : o.timers || {
-      setTimeout,
-      clearTimeout,
-      setImmediate,
+    timers: o.timers || {
       clearImmediate,
-      now: () => performance.now()
+      clearTimeout,
+      now: () => performance.now(),
+      setImmediate,
+      setTimeout,
+    },
+    transform: parseTransform(o.transform || { undefined }),
+    types: o.types || {},
+    unref_sockets: !!o.unref_sockets,
+  };
+
+  options.ssl = sslmode(options.ssl, options.sslrootcert);
+  options.infer = options.infer === true || options.infer === "true";
+  if (options.max === 1) {
+    options.scheduler = false;
+  }
+  return options;
+};
+
+// The options object given, with or without a url before it.
+const given = (a, b) => (!a || typeof a === "string" ? b : a) || {};
+
+// The parameters of a url's query by name, the last of a repeated one winning.
+const params = (searchParams) => {
+  const out = {};
+  for (const [k, v] of searchParams) {
+    out[k] = v;
+  }
+  return out;
+};
+
+const portOf = (o, query, env) => o.port || query.port || env.PGPORT || 5432;
+
+const userOf = (o, url, env) =>
+  o.user ||
+  o.username ||
+  url.url.username ||
+  env.PGUSERNAME ||
+  env.PGUSER ||
+  osUsername();
+
+const pathOf = (o, targets, port) =>
+  o.path ||
+  (targets[0][0].includes("/") &&
+    `${targets[0][0]}/.s.PGSQL.${targets[0][1] || port}`);
+
+const databaseOf = (o, url, env, user) =>
+  o.database ||
+  o.db ||
+  (url.url.pathname || "").slice(1) ||
+  env.PGDATABASE ||
+  (typeof user === "function" ? null : user);
+
+const passOf = (o, url, env) =>
+  o.pass || o.password || url.url.password || env.PGPASSWORD || "";
+
+const sslFile = (o, query, env, key, variable) =>
+  o[key] || query[key] || env[variable] || null;
+
+// Each default, as given in the options, else in the url, else in the environment.
+const setting = (k, d, o, query, env) => {
+  if (k in o && o[k] !== undefined) {
+    return o[k];
+  }
+  if (k in query) {
+    return query[k] === "disable" || query[k] === "false" ? false : query[k];
+  }
+  return env[`PG${k.toUpperCase()}`] || d;
+};
+
+const settings = (defaults, ints, o, query, env) => {
+  const out = {};
+  for (const [k, d] of Object.entries(defaults)) {
+    const value = setting(k, d, o, query, env);
+    out[k] = typeof value === "string" && ints.has(k) ? +value : value;
+  }
+  return out;
+};
+
+// The parameters of the url that go to the server as run-time parameters.
+const runtime = (query, defaults) => {
+  const out = {};
+  for (const [k, v] of Object.entries(query)) {
+    if (!(k in defaults) && !clientOnly.has(k)) {
+      out[k] = v;
     }
   }
-
-  options.ssl = sslmode(options.ssl, options.sslrootcert)
-  options.infer = options.infer === true || options.infer === 'true'
-  options.max === 1 && (options.scheduler = false)
-  return options
-}
+  return out;
+};
 
 // Parameters of a connection url that libpq reads itself. Any other parameter goes to the server as a
 // run-time parameter, so these must not, or the server refuses the connection.
 const clientOnly = new Set([
-  'host', 'port', 'hostaddr', 'dbname', 'user', 'password', 'passfile', 'service',
-  'sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'sslpassword', 'sslcrl', 'sslcrldir', 'sslsni',
-  'sslcompression', 'sslcertmode', 'sslkeylogfile', 'ssl_min_protocol_version', 'ssl_max_protocol_version',
-  'requiressl', 'requirepeer', 'require_auth', 'gssencmode', 'gsslib', 'gssdelegation', 'krbsrvname',
-  'keepalives', 'keepalives_idle', 'keepalives_interval', 'keepalives_count', 'tcp_user_timeout',
-  'load_balance_hosts', 'min_protocol_version', 'max_protocol_version', 'fallback_application_name',
-  'scram_client_key', 'scram_server_key', 'oauth_issuer', 'oauth_client_id', 'oauth_client_secret', 'oauth_scope'
-])
+  "host",
+  "port",
+  "hostaddr",
+  "dbname",
+  "user",
+  "password",
+  "passfile",
+  "service",
+  "sslmode",
+  "sslrootcert",
+  "sslcert",
+  "sslkey",
+  "sslpassword",
+  "sslcrl",
+  "sslcrldir",
+  "sslsni",
+  "sslcompression",
+  "sslcertmode",
+  "sslkeylogfile",
+  "ssl_min_protocol_version",
+  "ssl_max_protocol_version",
+  "requiressl",
+  "requirepeer",
+  "require_auth",
+  "gssencmode",
+  "gsslib",
+  "gssdelegation",
+  "krbsrvname",
+  "keepalives",
+  "keepalives_idle",
+  "keepalives_interval",
+  "keepalives_count",
+  "tcp_user_timeout",
+  "load_balance_hosts",
+  "min_protocol_version",
+  "max_protocol_version",
+  "fallback_application_name",
+  "scram_client_key",
+  "scram_server_key",
+  "oauth_issuer",
+  "oauth_client_id",
+  "oauth_client_secret",
+  "oauth_scope",
+]);
 
-const sslmodes = ['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full']
+const sslmodes = new Set([
+  "disable",
+  "allow",
+  "prefer",
+  "require",
+  "verify-ca",
+  "verify-full",
+]);
 
 // The ssl option as one of libpq's sslmodes, true, false or tls.connect options. sslrootcert=system
 // means verify-full, as in libpq, where a weaker mode is an error.
-function sslmode(x, rootcert) {
-  x === 'true' && (x = true)
-  x === 'disable' && (x = false)
-  if (x && typeof x === 'object')
-    return x
-
-  if (rootcert === 'system') {
-    if (x && x !== true && x !== 'verify-full')
-      throw new Error('sslrootcert=system needs sslmode verify-full, not ' + x)
-    return 'verify-full'
+const sslmode = (ssl, rootcert) => {
+  let x = ssl;
+  if (x === "true") {
+    x = true;
+  }
+  if (x === "disable") {
+    x = false;
+  }
+  if (x && typeof x === "object") {
+    return x;
   }
 
-  if (!x || x === true || sslmodes.includes(x))
-    return x
+  if (rootcert === "system") {
+    if (x && x !== true && x !== "verify-full") {
+      throw new Error(`sslrootcert=system needs sslmode verify-full, not ${x}`);
+    }
+    return "verify-full";
+  }
 
-  throw new Error('sslmode ' + x + ' is not supported')
-}
+  if (!x || x === true || sslmodes.has(x)) {
+    return x;
+  }
 
-function tsa(o, url, env) {
-  const x = o.target_session_attrs || url.searchParams.get('target_session_attrs') || env.PGTARGETSESSIONATTRS
-  if (!x || ['read-write', 'read-only', 'primary', 'standby', 'prefer-standby'].includes(x))
-    return x
+  throw new Error(`sslmode ${x} is not supported`);
+};
 
-  throw new Error('target_session_attrs ' + x + ' is not supported')
-}
+const tsa = (o, url, env) => {
+  const x =
+    o.target_session_attrs ||
+    url.searchParams.get("target_session_attrs") ||
+    env.PGTARGETSESSIONATTRS;
+  if (
+    !x ||
+    [
+      "read-write",
+      "read-only",
+      "primary",
+      "standby",
+      "prefer-standby",
+    ].includes(x)
+  ) {
+    return x;
+  }
 
-function binding(o, url, env) {
-  const x = o.channel_binding || url.searchParams.get('channel_binding') || env.PGCHANNELBINDING || 'prefer'
-  if (['disable', 'prefer', 'require'].includes(x))
-    return x
+  throw new Error(`target_session_attrs ${x} is not supported`);
+};
 
-  throw new Error('channel_binding ' + x + ' is not supported')
-}
+const binding = (o, url, env) => {
+  const x =
+    o.channel_binding ||
+    url.searchParams.get("channel_binding") ||
+    env.PGCHANNELBINDING ||
+    "prefer";
+  if (["disable", "prefer", "require"].includes(x)) {
+    return x;
+  }
 
-function backoff(retries) {
-  return (0.5 + Math.random() / 2) * Math.min(3 ** retries / 100, 20)
-}
+  throw new Error(`channel_binding ${x} is not supported`);
+};
 
-function max_lifetime() {
-  return 60 * (30 + Math.random() * 30)
-}
+const backoff = (retries) =>
+  (0.5 + Math.random() / 2) * Math.min(3 ** retries / 100, 20);
 
-function parseTransform(x) {
-  const value = typeof x.value === 'function' ? x.value : x.value && x.value.from
+const max_lifetime = () => 60 * (30 + Math.random() * 30);
+
+const parseTransform = (x) => {
+  const value =
+    typeof x.value === "function" ? x.value : x.value && x.value.from;
   return {
-    undefined: x.undefined,
-    json: x.json === true || (x.json === false ? false : undefined),
     column: {
-      from: typeof x.column === 'function' ? x.column : x.column && x.column.from,
-      to: x.column && x.column.to
+      from:
+        typeof x.column === "function" ? x.column : x.column && x.column.from,
+      to: x.column && x.column.to,
     },
+    json: x.json === true || (x.json === false ? false : undefined),
+    row: {
+      from: typeof x.row === "function" ? x.row : x.row && x.row.from,
+      to: x.row && x.row.to,
+    },
+    undefined: x.undefined,
     value: {
       from: x.json === false && value && value.keys ? undefined : value,
-      to: x.value && x.value.to
+      to: x.value && x.value.to,
     },
-    row: {
-      from: typeof x.row === 'function' ? x.row : x.row && x.row.from,
-      to: x.row && x.row.to
-    }
+  };
+};
+
+const parseUrl = (url) => {
+  if (!url || typeof url !== "string") {
+    return { targets: [], url: { searchParams: new Map() } };
   }
-}
 
-function parseUrl(url) {
-  if (!url || typeof url !== 'string')
-    return { url: { searchParams: new Map() }, targets: [] }
-
-  const rest = url.slice(url.indexOf('://') + 3)
-      , end = rest.search(/[/?]/)
-      , authority = end === -1 ? rest : rest.slice(0, end)
-      , at = authority.lastIndexOf('@')
-      , userinfo = at === -1 ? '' : authority.slice(0, at)
-      , colon = userinfo.indexOf(':')
-      , tail = new URL('postgres://x' + (end === -1 ? '' : rest.slice(end)))
+  const rest = url.slice(url.indexOf("://") + 3);
+  const end = rest.search(/[/?]/u);
+  const authority = end === -1 ? rest : rest.slice(0, end);
+  const at = authority.lastIndexOf("@");
+  const userinfo = at === -1 ? "" : authority.slice(0, at);
+  const colon = userinfo.indexOf(":");
+  const tail = new URL(`postgres://x${end === -1 ? "" : rest.slice(end)}`);
 
   return {
+    targets: authority.slice(at + 1)
+      ? split(authority.slice(at + 1), decode)
+      : [],
     url: {
-      username: decode(colon === -1 ? userinfo : userinfo.slice(0, colon)),
-      password: colon === -1 ? '' : decode(userinfo.slice(colon + 1)),
+      password: colon === -1 ? "" : decode(userinfo.slice(colon + 1)),
       pathname: decode(tail.pathname),
-      searchParams: tail.searchParams
+      searchParams: tail.searchParams,
+      username: decode(colon === -1 ? userinfo : userinfo.slice(0, colon)),
     },
-    targets: authority.slice(at + 1) ? split(authority.slice(at + 1), decode) : []
-  }
-}
+  };
+};
 
-function decode(x) {
+const decode = (x) => {
   try {
-    return decodeURIComponent(x)
-  } catch (_) {
-    return x
+    return decodeURIComponent(x);
+  } catch {
+    return x;
   }
-}
+};
 
-function hosts(o, query, url, env) {
-  const given = o.hostname || o.host || query.host
-  if (given)
-    return Array.isArray(given) ? given.map(x => [x, null]) : split(given)
+const hosts = (o, query, url, env) => {
+  const named = o.hostname || o.host || query.host;
+  if (named) {
+    return Array.isArray(named) ? named.map((x) => [x, null]) : split(named);
+  }
 
-  if (url.targets.some(([x]) => x))
-    return url.targets
+  if (url.targets.some(([x]) => x)) {
+    return url.targets;
+  }
 
-  return split(env.PGHOST || 'localhost').map(([x, p], i) => [x, p || (url.targets[i] && url.targets[i][1]) || null])
-}
+  return split(env.PGHOST || "localhost").map(([x, p], i) => [
+    x,
+    p || (url.targets[i] && url.targets[i][1]) || null,
+  ]);
+};
 
-function split(x, decoded = x => x) {
-  return x.split(',').filter(Boolean).map(x => {
-    const m = x.match(/^\[([^\]]*)\](?::(\d*))?$/) || x.match(/^([^:]*)(?::(\d*))?$/) || [x, x]
-    return [decoded(m[1]), m[2] ? +m[2] : null]
-  })
-}
+const split = (text, decoded = (x) => x) =>
+  text
+    .split(",")
+    .filter(Boolean)
+    .map((part) => {
+      const m = part.match(/^\[(?<host>[^\]]*)\](?::(?<port>\d*))?$/u) ||
+        part.match(/^(?<host>[^:]*)(?::(?<port>\d*))?$/u) || [part, part];
+      return [decoded(m[1]), m[2] ? +m[2] : null];
+    });
 
-function passfile(env) {
+const passfile = (env) => {
   try {
-    return env.PGPASSFILE || (process.platform === 'win32'
-      ? (env.APPDATA || '') + '\\postgresql\\pgpass.conf'
-      : os.homedir() + '/.pgpass')
-  } catch (_) {
-    return null
+    return (
+      env.PGPASSFILE ||
+      (process.platform === "win32"
+        ? `${env.APPDATA || ""}\\postgresql\\pgpass.conf`
+        : `${os.homedir()}/.pgpass`)
+    );
+  } catch {
+    return null;
   }
-}
+};
 
-function osUsername() {
+const osUsername = () => {
   try {
-    return os.userInfo().username
-  } catch (_) {
-    return process.env.USERNAME || process.env.USER || process.env.LOGNAME
+    return os.userInfo().username;
+  } catch {
+    return process.env.USERNAME || process.env.USER || process.env.LOGNAME;
   }
-}
+};
 
-function view(known, get) {
-  return new Proxy(known, {
-    get: (x, oid) => typeof oid === 'symbol' ? x[oid] : get(+oid)
-  })
-}
+const view = (known, get) =>
+  new Proxy(known, {
+    get: (x, oid) => (typeof oid === "symbol" ? x[oid] : get(+oid)),
+  });
