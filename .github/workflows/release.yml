@@ -115,7 +115,7 @@ jobs:
           node-version-file: .nvmrc
           registry-url: https://registry.npmjs.org
 
-      # prepublishOnly runs the linter, the types and the unit tests once more on this exact commit.
+      # prepublishOnly runs Ultracite, the types and the unit tests once more on this exact commit.
       - run: npm ci
 
       # Trusted publishing (OIDC) when the package is set up for it on npmjs.com; otherwise NPM_TOKEN,

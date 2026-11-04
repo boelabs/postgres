@@ -43,8 +43,9 @@ export default class Result extends Array {
   }
 }
 
-export function statement(item) {
+export const statement = (item) => {
   const x = item.statement;
+  // oxlint-disable-next-line sort-keys -- users see these keys in this order (result.statement)
   return {
     name: x ? x.name : "",
     string: x ? x.text : item.text || "",
@@ -52,4 +53,4 @@ export function statement(item) {
       item.params || (item.entry && item.entry.oids) || (x && x.oids) || [],
     columns: item.columns || [],
   };
-}
+};

@@ -1,5 +1,17 @@
 import { spawnSync } from "node:child_process";
 
+export const exec = (cmd, args) => {
+  const { stderr } = spawnSync(cmd, args, { encoding: "utf-8", stdio: "pipe" });
+  if (
+    stderr &&
+    !stderr.includes("already exists") &&
+    !stderr.includes("does not exist") &&
+    !stderr.includes("WARNING:")
+  ) {
+    throw stderr;
+  }
+};
+
 exec("dropdb", ["--force", "postgres_js_test"]);
 
 exec("psql", ["-c", "alter system set ssl=on"]);
@@ -29,15 +41,3 @@ exec("psql", [
   "-c",
   "alter database postgres_js_test owner to postgres_js_test",
 ]);
-
-export function exec(cmd, args) {
-  const { stderr } = spawnSync(cmd, args, { stdio: "pipe", encoding: "utf-8" });
-  if (
-    stderr &&
-    !stderr.includes("already exists") &&
-    !stderr.includes("does not exist") &&
-    !stderr.includes("WARNING:")
-  ) {
-    throw stderr;
-  }
-}

@@ -19,7 +19,7 @@ Pull requests are opened and merged by the project's collaborators only. A pull 
 - Node.js 24 or later (`.nvmrc`), and Bun 1.4 or later for the Bun suite
 - PostgreSQL 14 or later with `pg_ctl` and `psql` on `PATH`, **or** Docker
 
-The library itself has no dependencies; `npm install` only brings the linter and TypeScript.
+The library itself has no dependencies; `npm install` only brings [Ultracite](https://www.ultracite.ai) (Oxlint and Oxfmt) and TypeScript.
 
 ## Running the tests
 
@@ -48,7 +48,8 @@ A single area runs with a filter on the test names, as in `node tests/index.js "
 
 | Command | What it checks |
 | --- | --- |
-| `npm run lint` | ESLint, with the project's style |
+| `npm run check` | Ultracite: Oxfmt formatting and Oxlint rules (`npm run fix` applies both) |
+| `npm run check:docs` | Every link between the Markdown files leads somewhere |
 | `npm run test:types` | The TypeScript types against `types/test.ts` |
 | `npm run test:unit` | Unit tests, no database needed |
 | `npm run test:integration` | Everything against real servers |
@@ -60,7 +61,7 @@ A single area runs with a filter on the test names, as in `node tests/index.js "
 
 - **Language:** code, comments, identifiers, commit messages and documentation are in **English**.
 - **No dependencies.** The published package is `src/*.js` and `types/index.d.ts`, nothing else.
-- **Style:** `npm run lint` is the reference: two spaces, single quotes, no semicolons, leading commas in multi-line declarations. Comments say why, not what.
+- **Style:** [Ultracite](https://www.ultracite.ai)'s core rules on Oxlint, formatted by Oxfmt; `npm run check` is the reference and `npm run fix` applies it. `oxlint.config.ts` lists the few departures from the preset, each with its reason; a rule that cannot apply at one place is disabled on that line, with the reason beside it. Comments say why, not what. Coding agents have the Ultracite skill in `.agents/skills`.
 - **Every runtime:** a change must hold on Node.js, Bun and Cloudflare Workers. A Node.js-only API needs a guard or a fallback.
 - **Tests:** every fix comes with a test that fails without it; every option or behaviour with tests that run on Node.js and Bun.
 - **Docs:** the reference lives in `docs/`, one page per topic; `README.md` is the front page and stays short. User-facing changes update their page in `docs/`, `types/index.d.ts` (with a case in `types/test.ts`) and `CHANGELOG.md` under the next version. `npm run check:docs` checks the links.

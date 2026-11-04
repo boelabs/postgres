@@ -6,40 +6,47 @@ import { t } from "./test.js";
 
 t("Result is array", async () => [true, Array.isArray(await sql`select 1`)]);
 
-t("Result has count", async () => [1, (await sql`select 1`).count]);
+t("Result has count", async () => {
+  const { count } = await sql`select 1`;
+  return [1, count];
+});
 
-t("Result has command", async () => ["SELECT", (await sql`select 1`).command]);
+t("Result has command", async () => {
+  const { command } = await sql`select 1`;
+  return ["SELECT", command];
+});
 
-t("Create table", async () => [
-  "CREATE TABLE",
-  (await sql`create table test(int int)`).command,
-  await sql`drop table test`,
-]);
+t("Create table", async () => {
+  const { command } = await sql`create table test(int int)`;
+  return ["CREATE TABLE", command, await sql`drop table test`];
+});
 
 t("Drop table", async () => {
   await sql`create table test(int int)`;
-  return ["DROP TABLE", (await sql`drop table test`).command];
+  const { command } = await sql`drop table test`;
+  return ["DROP TABLE", command];
 });
 
-t("Big result", async () => [
-  100_000,
-  (await sql`select * from generate_series(1, 100000)`).count,
-]);
+t("Big result", async () => {
+  const { count } = await sql`select * from generate_series(1, 100000)`;
+  return [100_000, count];
+});
 
-t("Result has columns spec", async () => [
-  "x",
-  (await sql`select 1 as x`).columns[0].name,
-]);
+t("Result has columns spec", async () => {
+  const { columns } = await sql`select 1 as x`;
+  return ["x", columns[0].name];
+});
 
 t("Result as arrays", async () => {
-  const sql = postgres({
+  const db = postgres({
     ...options,
     transform: {
       row: (x) => Object.values(x),
     },
   });
 
-  return ["1,2", (await sql`select 1 as a, 2 as b`)[0].join(",")];
+  const [row] = await db`select 1 as a, 2 as b`;
+  return ["1,2", row.join(",")];
 });
 
 t("Raw method returns rows as arrays", async () => {
@@ -47,20 +54,20 @@ t("Raw method returns rows as arrays", async () => {
   return [Array.isArray(x), true];
 });
 
-t("Array returns rows as arrays of columns", async () => [
-  (await sql`select 1`.values())[0][0],
-  1,
-]);
+t("Array returns rows as arrays of columns", async () => {
+  const [[value]] = await sql`select 1`.values();
+  return [value, 1];
+});
 
 t("Execute", async () => {
-  const result = await new Promise((resolve) => {
-    const sql = postgres({
-      ...options,
-      fetch_types: false,
-      debug: (id, query) => resolve(query),
-    });
-    sql`select 1`.execute();
+  const debugged = Promise.withResolvers();
+  const db = postgres({
+    ...options,
+    debug: (id, query) => debugged.resolve(query),
+    fetch_types: false,
   });
+  db`select 1`.execute();
+  const result = await debugged.promise;
 
   return [result, "select 1"];
 });
@@ -68,7 +75,7 @@ t("Execute", async () => {
 t("Cancel running query", async () => {
   const query = sql`select pg_sleep(2)`;
   setTimeout(() => query.cancel(), 500);
-  const error = await query.catch((x) => x);
+  const error = await query.catch((queryError) => queryError);
   return ["57014", error.code];
 });
 
@@ -77,25 +84,27 @@ t("Cancel piped query", { timeout: 5 }, async () => {
   const last = sql`select pg_sleep(1)`.execute();
   const query = sql`select pg_sleep(2) as dig`;
   setTimeout(() => query.cancel(), 500);
-  const error = await query.catch((x) => x);
+  const error = await query.catch((queryError) => queryError);
   await last;
   return ["57014", error.code];
 });
 
 t("Cancel queued query", async () => {
   const query = sql`select pg_sleep(2) as nej`;
-  const tx = sql.begin(
-    (sql) => (query.cancel(), sql`select pg_sleep(0.5) as hej, 'hejsa'`)
-  );
-  const error = await query.catch((x) => x);
+  const tx = sql.begin((transaction) => {
+    query.cancel();
+    return transaction`select pg_sleep(0.5) as hej, 'hejsa'`;
+  });
+  const error = await query.catch((queryError) => queryError);
   await tx;
   return ["57014", error.code];
 });
 
-t("Result becomes array", async () => [
-  true,
-  (await sql`select 1`).slice() instanceof Array,
-]);
+t("Result becomes array", async () => {
+  const result = await sql`select 1`;
+  // oxlint-disable-next-line unicorn/prefer-spread -- the test is about what slice returns
+  return [true, Array.isArray(result.slice())];
+});
 
 t("Include table oid and column number in column details", async () => {
   await sql`create table tester (name text, age int)`;
@@ -112,22 +121,24 @@ t("Include table oid and column number in column details", async () => {
 });
 
 t("Large object", async () => {
-  const file = rel("index.js"),
-    md5 = crypto.createHash("md5").update(fs.readFileSync(file)).digest("hex");
+  const file = rel("index.js");
+  const md5 = crypto
+    .createHash("md5")
+    .update(fs.readFileSync(file))
+    .digest("hex");
 
   const lo = await sql.largeObject();
-  await new Promise(async (r) =>
-    fs
-      .createReadStream(file)
-      .pipe(await lo.writable())
-      .on("finish", r)
-  );
+  const written = Promise.withResolvers();
+  const source = fs.createReadStream(file);
+  source.pipe(await lo.writable()).on("finish", written.resolve);
+  await written.promise;
   await lo.seek(0);
 
   const out = crypto.createHash("md5");
-  await new Promise((r) =>
-    lo.readable().then((x) => x.on("data", (x) => out.update(x)).on("end", r))
-  );
+  const ended = Promise.withResolvers();
+  const readable = await lo.readable();
+  readable.on("data", (x) => out.update(x)).on("end", ended.resolve);
+  await ended.promise;
 
   return [md5, out.digest("hex"), await lo.close()];
 });
@@ -135,22 +146,24 @@ t("Large object", async () => {
 t(
   "Large object tell, size, truncate, and ranges for readable and writable",
   async () => {
-    const lo = await sql.largeObject(),
-      read = async (o) => {
-        let s = "";
-        for await (const x of await lo.readable(o)) {
-          s += x;
-        }
-        return s;
-      };
+    const lo = await sql.largeObject();
+    const read = async (o) => {
+      let s = "";
+      for await (const x of await lo.readable(o)) {
+        s += x;
+      }
+      return s;
+    };
     await lo.write(Buffer.from("0123456789"));
-    const [tell] = await lo.tell(),
-      [size] = await lo.size();
+    const [tell] = await lo.tell();
+    const [size] = await lo.size();
     await lo.seek(0);
-    const range = await read({ start: 2, end: 6 }),
-      rest = await read({ highWaterMark: 4 }),
-      writable = await lo.writable({ start: 3 });
-    await new Promise((r) => writable.end("abc", r));
+    const range = await read({ end: 6, start: 2 });
+    const rest = await read({ highWaterMark: 4 });
+    const writable = await lo.writable({ start: 3 });
+    const ended = Promise.withResolvers();
+    writable.end("abc", ended.resolve);
+    await ended.promise;
     await lo.seek(0);
     const all = await read();
     await lo.truncate(4);
@@ -178,113 +191,124 @@ t("Multiple statements give one result each", async () => {
   );
   return [
     "3:UPDATE,DELETE,SELECT",
-    `${xs.length}:${xs.map((x) => x.command).join()}`,
+    `${xs.length}:${xs.map((x) => x.command).join(",")}`,
     await sql`drop table test`,
   ];
 });
 
 t("Error mid-result does not offset rows of next query", async () => {
-  const sql = postgres({ ...options, max: 1 });
-  await sql`select 1 / (g - 3) from generate_series(1, 5) g`.catch((x) => x);
-  const result = await sql`select 1 as x`;
-  await sql.end();
+  const db = postgres({ ...options, max: 1 });
+  await db`select 1 / (g - 3) from generate_series(1, 5) g`.catch(
+    (error) => error
+  );
+  const result = await db`select 1 as x`;
+  await db.end();
   return [1, result.length];
 });
 
 t("Result is not sparse after a query errors mid row-stream", async () => {
-  const sql = postgres({ ...options, max: 1 });
-  await sql`select n, 1 / (3 - n) as boom from generate_series(1, 5) n`.catch(
-    () => {}
+  const db = postgres({ ...options, max: 1 });
+  await db`select n, 1 / (3 - n) as boom from generate_series(1, 5) n`.catch(
+    () => {
+      // The error is expected, the next query is what is tested.
+    }
   );
-  const result = await sql`select x from generate_series(1, 3) x`;
-  await sql.end();
+  const result = await db`select x from generate_series(1, 3) x`;
+  await db.end();
   return ["3:1,2,3", `${result.length}:${result.map((r) => r.x).join(",")}`];
 });
 
 t("Undefined value in a pipelined query rejects only that query", async () => {
-  const sql = postgres(options);
-  await sql`select 1`;
+  const db = postgres(options);
+  await db`select 1`;
   const results = await Promise.all(
     [
-      sql`select pg_sleep(0.1), 1 as x`,
-      sql`select ${undefined} as x`,
-      sql`select 3 as x`,
+      db`select pg_sleep(0.1), 1 as x`,
+      db`select ${undefined} as x`,
+      db`select 3 as x`,
     ].map((x) =>
       x.then(
-        ([x]) => x.x,
-        (e) => e.code
+        ([row]) => row.x,
+        (error) => error.code
       )
     )
   );
-  const after = (await sql`select 4 as x`)[0].x;
-  await sql.end();
-  return ["1,UNDEFINED_VALUE,3,4", [...results, after].join()];
+  const [{ x: after }] = await db`select 4 as x`;
+  await db.end();
+  return ["1,UNDEFINED_VALUE,3,4", [...results, after].join(",")];
 });
 
 t("Undefined value in a pipelined cursor rejects only that query", async () => {
-  const sql = postgres(options);
-  await sql`select 1`;
+  const db = postgres(options);
+  await db`select 1`;
   const results = await Promise.all(
     [
-      sql`select pg_sleep(0.1), 1 as x`,
-      sql`select ${undefined} as x`.cursor(() => {}),
-      sql`select 3 as x`,
+      db`select pg_sleep(0.1), 1 as x`,
+      db`select ${undefined} as x`.cursor(() => {
+        // The query rejects before a row arrives.
+      }),
+      db`select 3 as x`,
     ].map((x) =>
       x.then(
-        (x) => (x.length ? x[0].x : x.command),
-        (e) => e.code
+        (result) => (result.length ? result[0].x : result.command),
+        (error) => error.code
       )
     )
   );
-  const after = (await sql`select 4 as x`)[0].x;
-  await sql.end();
-  return ["1,UNDEFINED_VALUE,3,4", [...results, after].join()];
+  const [{ x: after }] = await db`select 4 as x`;
+  await db.end();
+  return ["1,UNDEFINED_VALUE,3,4", [...results, after].join(",")];
 });
 
 t(
   "Too many parameters in a pipelined query rejects only that query",
   async () => {
-    const sql = postgres(options);
-    await sql`select 1`;
+    const db = postgres(options);
+    await db`select 1`;
     const results = await Promise.all(
       [
-        sql`select pg_sleep(0.1), 1 as x`,
-        sql.unsafe("select 2 as x", [...new Array(65_535).keys()]),
-        sql`select 3 as x`,
-        sql`select 4 as x`,
+        db`select pg_sleep(0.1), 1 as x`,
+        db.unsafe(
+          "select 2 as x",
+          Array.from({ length: 65_535 }, (_, i) => i)
+        ),
+        db`select 3 as x`,
+        db`select 4 as x`,
       ].map((x) =>
         x.then(
-          ([x]) => x.x,
-          (e) => e.code
+          ([row]) => row.x,
+          (error) => error.code
         )
       )
     );
-    const after = (await sql`select 5 as x`)[0].x;
-    await sql.end();
-    return ["1,MAX_PARAMETERS_EXCEEDED,3,4,5", [...results, after].join()];
+    const [{ x: after }] = await db`select 5 as x`;
+    await db.end();
+    return ["1,MAX_PARAMETERS_EXCEEDED,3,4,5", [...results, after].join(",")];
   }
 );
 
 t(
   "Parameter failing to serialize in a pipelined cursor rejects only that query",
   async () => {
-    const sql = postgres(options);
-    await sql`select 1`;
+    const db = postgres(options);
+    await db`select 1`;
     const results = await Promise.all(
       [
-        sql`select pg_sleep(0.1), 1 as x`,
-        sql`select ${new Date(NaN)}::timestamptz as x`.cursor(() => {}),
-        sql`select 3 as x`,
+        db`select pg_sleep(0.1), 1 as x`,
+        db`select ${new Date(Number.NaN)}::timestamptz as x`.cursor(() => {
+          // The query rejects before a row arrives.
+        }),
+        db`select 3 as x`,
       ].map((x) =>
         x.then(
-          (x) => (x.length ? x[0].x : x.command),
-          (e) => e.name
+          (result) => (result.length ? result[0].x : result.command),
+          (error) => error.name
         )
       )
     );
-    const after = (await sql`select 4 as x`)[0].x;
-    await sql.end();
-    return ["1,RangeError,3,4", [...results, after].join()];
+    const [{ x: after }] = await db`select 4 as x`;
+    await db.end();
+    return ["1,RangeError,3,4", [...results, after].join(",")];
   }
 );
 
@@ -294,7 +318,7 @@ t("Cancel piped query with a query piped behind it", async () => {
   const query = sql`select pg_sleep(2) as dig`;
   setTimeout(() => query.cancel(), 100);
   const [error, [{ x }]] = await Promise.all([
-    query.catch((x) => x),
+    query.catch((queryError) => queryError),
     sql`select 1 as x`,
   ]);
   await last;
@@ -304,7 +328,7 @@ t("Cancel piped query with a query piped behind it", async () => {
 t("Cancel returns a promise", async () => {
   const query = sql`select pg_sleep(1)`.execute();
   const cancelled = query.cancel();
-  const error = await query.catch((x) => x);
+  const error = await query.catch((queryError) => queryError);
   return ["true,57014", `${cancelled instanceof Promise},${error.code}`];
 });
 
@@ -318,12 +342,12 @@ t(
       "select $1::int as a|23|a|true||select 1 as b|b",
       [
         r.statement.string,
-        r.statement.types.join(),
-        r.statement.columns.map((x) => x.name).join(),
+        r.statement.types.join(","),
+        r.statement.columns.map((x) => x.name).join(","),
         q.statement.string === r.statement.string,
         s.statement.name,
         s.statement.string,
-        s.statement.columns.map((x) => x.name).join(),
+        s.statement.columns.map((x) => x.name).join(","),
       ].join("|"),
     ];
   }
@@ -333,39 +357,39 @@ t(
   "debug gets the values as sent and the parameter types, also on first use",
   async () => {
     const calls = [];
-    const sql = postgres({
+    const db = postgres({
       ...options,
-      max: 1,
       debug: (id, query, values, types) =>
         calls.push(JSON.stringify([values, types])),
+      max: 1,
     });
-    await sql`select ${1}::int as x`;
-    await sql`select ${1}::int as x`;
+    await db`select ${1}::int as x`;
+    await db`select ${1}::int as x`;
     return [
       '[["1"],[23]] [["1"],[23]]',
       calls.slice(-2).join(" "),
-      await sql.end(),
+      await db.end(),
     ];
   }
 );
 
 t("Inspecting a query with debug shows why it can not be built", async () => {
-  const util = await import("node:util"),
-    sql = postgres({ ...options, debug: true });
+  const { inspect } = await import("node:util");
+  const db = postgres({ ...options, debug: true });
   return [
     "Query { UNDEFINED_VALUE: Undefined values are not allowed }",
-    util.inspect(sql`select ${undefined}`),
-    await sql.end(),
+    inspect(db`select ${undefined}`),
+    await db.end(),
   ];
 });
 
-t(".stream() says it is now .forEach()", async () => [
+t(".stream() says it is now .forEach()", () => [
   ".stream has been renamed to .forEach",
   (() => {
     try {
       sql`select 1`.stream();
-    } catch (e) {
-      return e.message;
+    } catch (error) {
+      return error.message;
     }
   })(),
 ]);
@@ -384,11 +408,11 @@ t(
     const codes = [
       await sql`insert into test ${sql({ x: 1 })}`.then(
         () => "ran",
-        (e) => e.code
+        (error) => error.code
       ),
       await sql.unsafe("insert into test values (1)").then(
         () => "ran",
-        (e) => e.code
+        (error) => error.code
       ),
       await sql`select count(*)::int as n from test`.then(([x]) => x.n),
     ];

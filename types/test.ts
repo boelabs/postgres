@@ -1,20 +1,23 @@
 import dc from "node:diagnostics_channel";
 
-import postgres, {
-  type Sql,
-  type TransactionSql,
-  type Row,
-  type PendingQuery,
-  type ReplicationEvent,
-  type QueryTrace,
-  type PoolEvent,
+import postgres from "./index.js";
+import type {
+  Sql,
+  TransactionSql,
+  Row,
+  PendingQuery,
+  ReplicationEvent,
+  QueryTrace,
+  PoolEvent,
 } from "./index.js";
 
 type Equal<A, B> =
   (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
     ? true
     : false;
-const expect = <T extends true>() => {};
+const expect = <_T extends true>() => {
+  // Only the type argument is checked, by the compiler.
+};
 
 interface User {
   id: number;
@@ -23,21 +26,21 @@ interface User {
 }
 
 const sql = postgres({
+  connection: { application_name: "test", statement_timeout: 1000 },
   host: ["a", "b"],
+  idle_timeout: 20,
+  infer: false,
+  max: 10,
+  max_lifetime: () => 60,
+  max_pipeline: 50,
+  onnotice: false,
+  onread: false,
+  password: () => Promise.resolve("secret"),
   port: 5432,
+  slot: "my_slot",
   ssl: "require",
   sslnegotiation: "direct",
-  max: 10,
-  max_pipeline: 50,
-  idle_timeout: 20,
-  max_lifetime: () => 60,
-  infer: false,
-  onnotice: false,
-  slot: "my_slot",
-  onread: false,
-  password: async () => "secret",
   transform: postgres.camel,
-  connection: { application_name: "test", statement_timeout: 1000 },
   types: { bigint: postgres.BigInt },
 });
 
@@ -49,14 +52,14 @@ postgres({ sslnegotiation: "eventually" });
 // @ts-expect-error not an ssl mode
 postgres({ ssl: "sometimes" });
 
-async function queries() {
+const queries = async () => {
   const users = await sql<
     User[]
   >`select * from users where id = ${1} and name = ${"a"}`;
   expect<Equal<(typeof users)[number], User>>();
-  users.count;
-  users.command;
-  users.columns[0].name;
+  void users.count;
+  void users.command;
+  void users.columns[0].name;
   for (const user of users) {
     expect<Equal<typeof user, User>>();
   }
@@ -68,21 +71,21 @@ async function queries() {
   expect<Equal<(typeof rows)[number], Row>>();
 
   const big = await sql`select ${sql.typed.bigint(10n)} as x`;
-  big[0].x;
+  void big[0].x;
 
   const q = sql`select ${new Date()} as d`;
-  const text: string = q.text;
-  const parameters: any[] = q.parameters;
+  q.text satisfies string;
+  q.parameters satisfies unknown[];
   expect<Equal<typeof q, PendingQuery<Row[]>>>();
 
-  await sql`insert into users ${sql({ name: "a", age: 1 }, "name", "age")}`;
+  await sql`insert into users ${sql({ age: 1, name: "a" }, "name", "age")}`;
   await sql`insert into users ${sql([
-    { name: "a", age: 1 },
-    { name: "b", age: 2 },
+    { age: 1, name: "a" },
+    { age: 2, name: "b" },
   ])}`;
   await sql`update users set ${sql({ name: "b" })} where id = 1`;
   await sql`select * from ${sql("users")} where id in ${sql([1, 2, 3])}`;
-  await sql`select * from users ${true ? sql`where id = ${1}` : sql``}`;
+  await sql`select * from users ${users.length > 0 ? sql`where id = ${1}` : sql``}`;
   await sql`select ${sql.json({ a: [1, 2] })}::json`;
   await sql`select ${[1, 2, 3]}::int[]`;
 
@@ -91,13 +94,15 @@ async function queries() {
   await sql.unsafe("select 1; select 2", { simple: true });
 
   const values = await sql`select 1 as x`.values();
+  // oxlint-disable-next-line typescript/no-explicit-any -- the type under test is any[]
   expect<Equal<(typeof values)[number], any[]>>();
   const raw = await sql`select 1 as x`.raw();
-  raw[0][0];
+  void raw[0][0];
 
   const statement = await sql`select ${1}::int as x`.describe();
   statement.types.map((x) => x + 1);
 
+  // oxlint-disable-next-line unicorn/no-array-for-each -- the forEach of a query, not of an array
   await sql<User[]>`select * from users`.forEach((user) => {
     expect<Equal<typeof user, User>>();
   });
@@ -106,7 +111,7 @@ async function queries() {
     expect<Equal<typeof batch, User[]>>();
   }
 
-  await sql<User[]>`select * from users`.cursor(10, async (batch) => {
+  await sql<User[]>`select * from users`.cursor(10, (batch) => {
     expect<Equal<typeof batch, User[]>>();
     return sql.CLOSE;
   });
@@ -122,25 +127,25 @@ async function queries() {
   // @ts-expect-error a helper is not a query
   await sql("users");
   // @ts-expect-error removed in v4
-  sql.array([1, 2]).value;
-}
+  void sql.array([1, 2]).value;
+};
 
-async function transactions() {
-  const [a, b] = await sql.begin((sql) => [
-    sql`select 1 as x`,
-    sql<User[]>`select * from users`,
+const transactions = async () => {
+  const [a, b] = await sql.begin((tx) => [
+    tx`select 1 as x`,
+    tx<User[]>`select * from users`,
   ]);
   expect<Equal<(typeof a)[number], Row>>();
   expect<Equal<(typeof b)[number], User>>();
 
-  const result = await sql.begin("read write", async (sql) => {
-    const tx: TransactionSql<{ bigint: bigint }> = sql;
-    await sql.savepoint(async (sql) => sql`select 1`);
-    await sql.savepoint("named", (sql) => sql`select 1`);
-    expect<Equal<ReturnType<typeof sql.prepare>, string>>();
-    sql.prepare("tx1");
-    expect<Equal<ReturnType<typeof sql.rollback>, Promise<void>>>();
-    await sql.savepoint((sql) => sql.rollback());
+  const result = await sql.begin("read write", async (tx) => {
+    tx satisfies TransactionSql<{ bigint: bigint }>;
+    await tx.savepoint(async (sp) => await sp`select 1`);
+    await tx.savepoint("named", (sp) => sp`select 1`);
+    expect<Equal<ReturnType<typeof tx.prepare>, string>>();
+    tx.prepare("tx1");
+    expect<Equal<ReturnType<typeof tx.rollback>, Promise<void>>>();
+    await tx.savepoint((sp) => sp.rollback());
     return 42;
   });
   expect<Equal<typeof result, number>>();
@@ -150,9 +155,9 @@ async function transactions() {
   reserved.release();
   // @ts-expect-error a reserved connection cannot end the pool
   reserved.end();
-}
+};
 
-async function rest() {
+const rest = async () => {
   const listened = await sql.listen("news", (payload) => {
     expect<Equal<typeof payload, string>>();
   });
@@ -163,18 +168,20 @@ async function rest() {
 
   const { unsubscribe } = await sql.subscribe(
     "*:users",
-    async (row, info, event) => {
+    (row, info, _event) => {
       expect<Equal<typeof info, ReplicationEvent>>();
-      info.lsn;
-      info.time;
+      void info.lsn;
+      void info.time;
       if (info.command === "update") {
-        info.old;
+        void info.old;
       }
       if (info.command === "truncate") {
-        info.restartIdentity;
+        void info.restartIdentity;
       }
     },
-    () => {},
+    () => {
+      // Nothing to do once subscribed.
+    },
     (error) => error.message
   );
   unsubscribe();
@@ -182,9 +189,9 @@ async function rest() {
   const lo = await sql.largeObject();
   await lo.close();
 
-  sql.stats.waiting;
-  sql.options.max;
-  sql.parameters.TimeZone;
+  void sql.stats.waiting;
+  void sql.options.max;
+  void sql.parameters.TimeZone;
 
   await sql.close();
   await sql.end({ timeout: 5 });
@@ -193,14 +200,12 @@ async function rest() {
     await sql`select`;
   } catch (error) {
     if (error instanceof postgres.PostgresError) {
-      error.code;
+      void error.code;
     }
   }
-}
+};
 
-function pass(sql: Sql) {
-  return sql`select 1`;
-}
+const pass = (db: Sql) => db`select 1`;
 pass(postgres());
 
 const named: string = postgres.toCamel("a_b");
@@ -210,18 +215,18 @@ dc.subscribe("tracing:postgres:query:asyncEnd", (message) => {
   const x = message as QueryTrace;
   const ms: number | null = x.complete && x.complete - x.queued;
   x.command?.toLowerCase();
-  ms;
+  void ms;
 });
 dc.subscribe(
   "postgres:pool",
   (message) => (message as PoolEvent).stats.waiting
 );
 
-queries;
-transactions;
-rest;
+void queries;
+void transactions;
+void rest;
 
-async function batched() {
+const batched = async () => {
   const [a, b] = await sql.batch([
     sql<{ id: number }[]>`select 1 as id`,
     sql<{ name: string }[]>`select 'a' as name`,
@@ -229,40 +234,49 @@ async function batched() {
   a[0].id satisfies number;
   b[0].name satisfies string;
   const none: [] = await sql.batch([]);
-  none;
+  void none;
   await sql
     .batch([sql`select 1`])
-    .catch((e: postgres.PostgresError) => e.index satisfies number | undefined);
-}
-batched;
+    .catch(
+      (error: postgres.PostgresError) =>
+        error.index satisfies number | undefined
+    );
+};
+void batched;
 
 // TLS as libpq's sslmode, with the files it reads
 postgres({
   ssl: "verify-ca",
-  sslrootcert: "/etc/ssl/ca.pem",
   sslcert: "client.crt",
   sslkey: "client.key",
   sslpassword: "x",
+  sslrootcert: "/etc/ssl/ca.pem",
 });
 postgres({ ssl: "verify-full", sslrootcert: "system" });
 // @ts-expect-error not an sslmode
 postgres({ ssl: "verify_full" });
 
 // Advisory locks
-async function locks() {
+const locks = async () => {
   const n: number = await sql.lock(918_273_645, async (locked) => {
     const [x] = await locked<{ n: number }[]>`select 1 as n`;
-    return x!.n;
+    return x.n;
   });
-  await sql.lock("migrations", () => {}, {
-    wait: false,
-    signal: AbortSignal.timeout(1000),
-  });
+  await sql.lock(
+    "migrations",
+    () => {
+      // Holding the lock is all this checks.
+    },
+    {
+      signal: AbortSignal.timeout(1000),
+      wait: false,
+    }
+  );
   await sql.lock(1n, () => "x");
   // @ts-expect-error a lock key is a number, a bigint or a string
   await sql.lock({}, () => 1);
   // @ts-expect-error the function comes second
   await sql.lock(1);
   return n;
-}
-locks;
+};
+void locks;

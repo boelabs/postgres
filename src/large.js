@@ -5,24 +5,63 @@ export default function largeObject(
   oid,
   mode = 0x00_02_00_00 | 0x00_04_00_00
 ) {
-  return new Promise(async (resolve, reject) => {
-    await sql
-      .begin(async (sql) => {
-        let finish;
-        !oid && ([{ oid }] = await sql`select lo_creat(-1) as oid`);
-        const [{ fd }] = await sql`select lo_open(${oid}, ${mode}) as fd`;
+  const { promise, resolve, reject } = Promise.withResolvers();
+  sql
+    .begin(async (tx) => {
+      let loid = oid;
+      if (!loid) {
+        [{ oid: loid }] = await tx`select lo_creat(-1) as oid`;
+      }
+      const [{ fd }] = await tx`select lo_open(${loid}, ${mode}) as fd`;
+      const { promise: closed, resolve: finish } = Promise.withResolvers();
 
-        const lo = {
-          writable,
-          readable,
-          close: () => sql`select lo_close(${fd})`.then(finish),
-          tell: () => sql`select lo_tell64(${fd})`,
-          read: (x) => sql`select loread(${fd}, ${x}) as data`,
-          write: (x) => sql`select lowrite(${fd}, ${x})`,
-          truncate: (x) => sql`select lo_truncate64(${fd}, ${x})`,
-          seek: (x, whence = 0) =>
-            sql`select lo_lseek64(${fd}, ${x}, ${whence})`,
-          size: () => sql`
+      const readable = async ({
+        highWaterMark = 2048 * 8,
+        start = 0,
+        end = Infinity,
+      } = {}) => {
+        let max = end - start;
+        if (start) {
+          await lo.seek(start);
+        }
+
+        return new Stream.Readable({
+          highWaterMark,
+          async read(size) {
+            const l = Math.min(size, max);
+            max -= l;
+            const [{ data }] = await lo.read(l);
+            if (data.length) {
+              this.push(data);
+            }
+            if (data.length < l || max === 0) {
+              this.push(null);
+            }
+          },
+        });
+      };
+
+      const writable = async ({ highWaterMark = 2048 * 8, start = 0 } = {}) => {
+        if (start) {
+          await lo.seek(start);
+        }
+
+        return new Stream.Writable({
+          highWaterMark,
+          // oxlint-disable-next-line promise/prefer-await-to-callbacks -- Node's Writable contract
+          write(chunk, encoding, callback) {
+            // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch, promise/no-callback-in-promise, promise/prefer-await-to-callbacks -- Node's Writable takes a callback; then(ok, fail) calls it exactly once and runs the query now, as await would a tick later
+            lo.write(chunk).then(() => callback(), callback);
+          },
+        });
+      };
+
+      const lo = {
+        close: () => tx`select lo_close(${fd})`.then(finish),
+        read: (x) => tx`select loread(${fd}, ${x}) as data`,
+        readable,
+        seek: (x, whence = 0) => tx`select lo_lseek64(${fd}, ${x}, ${whence})`,
+        size: () => tx`
           select
             lo_lseek64(${fd}, location, 0) as position,
             seek.size
@@ -33,45 +72,16 @@ export default function largeObject(
             from (select lo_tell64($1) as location) tell
           ) seek
         `,
-        };
+        tell: () => tx`select lo_tell64(${fd})`,
+        truncate: (x) => tx`select lo_truncate64(${fd}, ${x})`,
+        writable,
+        write: (x) => tx`select lowrite(${fd}, ${x})`,
+      };
 
-        resolve(lo);
+      resolve(lo);
 
-        return new Promise(async (r) => (finish = r));
-
-        async function readable({
-          highWaterMark = 2048 * 8,
-          start = 0,
-          end = Infinity,
-        } = {}) {
-          let max = end - start;
-          start && (await lo.seek(start));
-
-          return new Stream.Readable({
-            highWaterMark,
-            async read(size) {
-              const l = Math.min(size, max);
-              max -= l;
-              const [{ data }] = await lo.read(l);
-              data.length && this.push(data);
-              if (data.length < l || max === 0) {
-                this.push(null);
-              }
-            },
-          });
-        }
-
-        async function writable({ highWaterMark = 2048 * 8, start = 0 } = {}) {
-          start && (await lo.seek(start));
-
-          return new Stream.Writable({
-            highWaterMark,
-            write(chunk, encoding, callback) {
-              lo.write(chunk).then(() => callback(), callback);
-            },
-          });
-        }
-      })
-      .catch(reject);
-  });
+      return closed;
+    })
+    .catch(reject);
+  return promise;
 }

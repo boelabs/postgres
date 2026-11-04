@@ -1,6 +1,6 @@
 # One weekly pull request per ecosystem, with releases out for a week first: CI checks it like any
 # other change. Majors are upgraded on purpose, never proposed. Actions are pinned by commit;
-# Dependabot moves the pin and its version comment. npm here is only the development tools (ESLint,
+# Dependabot moves the pin and its version comment. npm here is only the development tools (Ultracite,
 # TypeScript): the package itself has no dependencies.
 version: 2
 updates:

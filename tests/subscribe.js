@@ -48,14 +48,14 @@ t("subscribe", { timeout: 10 }, async () => {
 
 t("subscribe with transform", { timeout: 10 }, async () => {
   const sql = postgres({
+    database: "postgres_js_test",
+    publications: "alltables",
     transform: {
       column: {
         from: postgres.toCamel,
         to: postgres.fromCamel,
       },
     },
-    database: "postgres_js_test",
-    publications: "alltables",
   });
 
   await sql.unsafe(
@@ -98,24 +98,27 @@ t("subscribe with transform", { timeout: 10 }, async () => {
 t("subscribe reconnects and calls onsubscribe", { timeout: 10 }, async () => {
   const sql = postgres({
     database: "postgres_js_test",
-    publications: "alltables",
     fetch_types: false,
+    publications: "alltables",
   });
 
   await sql.unsafe(
     "drop publication if exists alltables; create publication alltables for all tables"
   );
 
-  const result = [],
-    errors = [],
-    state = () => JSON.stringify({ onsubscribes, result, errors });
+  const result = [];
+  const errors = [];
+  // oxlint-disable-next-line sort-keys -- the order the timeout message shows the state in
+  const state = () => JSON.stringify({ onsubscribes, result, errors });
   let onsubscribes = 0;
 
   const { unsubscribe, sql: subscribeSql } = await sql.subscribe(
     "*",
     (row, { command, old }) =>
       result.push(command, row.name || row.id, old && old.name),
-    () => onsubscribes++,
+    () => {
+      onsubscribes += 1;
+    },
     (error) => errors.push(error.code || error.message)
   );
 
@@ -142,23 +145,33 @@ t("subscribe reconnects and calls onsubscribe", { timeout: 10 }, async () => {
   ];
 });
 
-const until = async (fn, ms = 5000, state) => {
+const until = async (fn, ms, state) => {
+  const limit = ms === undefined ? 5000 : ms;
   const start = Date.now();
   while (!fn()) {
-    if (Date.now() - start > ms) {
+    if (Date.now() - start > limit) {
       throw new Error(
         `Timed out waiting for ${fn}${state ? ` with ${state()}` : ""}`
       );
     }
+    // oxlint-disable-next-line no-await-in-loop -- polling: each check waits for the one before
     await delay(10);
   }
 };
 
-async function replicating(name) {
+// Polls with no time limit of its own: the test's timeout ends it.
+const untilTrue = async (fn) => {
+  while (!fn()) {
+    // oxlint-disable-next-line no-await-in-loop -- polling: each check waits for the one before
+    await delay(20);
+  }
+};
+
+const replicating = async (name) => {
   const sql = postgres({
     database: "postgres_js_test",
-    publications: "alltables",
     max: 1,
+    publications: "alltables",
   });
   await sql`drop table if exists test`;
   await sql`drop publication if exists alltables`;
@@ -166,11 +179,11 @@ async function replicating(name) {
   await sql.unsafe("create publication alltables for all tables");
   await sql`create table test (id serial primary key, name text)`;
   return {
-    sql,
     async done(...slots) {
       await sql`drop table test`;
       await sql`drop publication alltables`;
       for (const slot of slots) {
+        // oxlint-disable-next-line no-await-in-loop -- the slots are dropped one after another
         await sql`select pg_drop_replication_slot(slot_name) from pg_replication_slots where slot_name = ${slot}`;
       }
       await sql.end();
@@ -181,15 +194,16 @@ async function replicating(name) {
         publications: "alltables",
         slot: name,
       }),
+    sql,
   };
-}
+};
 
 t(
   "subscribe with a persistent slot resumes where it left off",
   { timeout: 10 },
   async () => {
-    const { sql, done, replica } = await replicating("postgresjs_resume"),
-      seen = [];
+    const { sql, done, replica } = await replicating("postgresjs_resume");
+    const seen = [];
 
     const first = replica();
     await first.subscribe("insert:test", (row) => seen.push(row.name));
@@ -210,7 +224,7 @@ t(
       await sql`select temporary, active from pg_replication_slots where slot_name = 'postgresjs_resume'`;
     return [
       "a,b,c false false",
-      `${seen.join()} ${slot.temporary} ${slot.active}`,
+      `${seen.join(",")} ${slot.temporary} ${slot.active}`,
       await done("postgresjs_resume"),
     ];
   }
@@ -220,22 +234,23 @@ t(
   "subscribe with a persistent slot runs async handlers in commit order",
   { timeout: 10 },
   async () => {
-    const { sql, done, replica } = await replicating("postgresjs_order"),
-      seen = [],
-      sub = replica();
+    const { sql, done, replica } = await replicating("postgresjs_order");
+    const seen = [];
+    const sub = replica();
 
     await sub.subscribe("insert:test", async (row) => {
       await delay(Math.random() * 20);
       seen.push(row.id);
     });
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 10; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one transaction after another is the commit order tested
       await sql`insert into test (name) values (${`x${i}`})`;
     }
     await until(() => seen.length === 10);
     await sub.end();
     return [
       "1,2,3,4,5,6,7,8,9,10",
-      seen.join(),
+      seen.join(","),
       await done("postgresjs_order"),
     ];
   }
@@ -245,31 +260,38 @@ t(
   "subscribe with a persistent slot delivers a failed transaction again",
   { timeout: 10 },
   async () => {
-    const { sql, done, replica } = await replicating("postgresjs_retry"),
-      seen = [],
-      errors = [],
-      sub = replica();
+    const { sql, done, replica } = await replicating("postgresjs_retry");
+    const seen = [];
+    const errors = [];
+    const sub = replica();
     let fails = 1;
 
     await sub.subscribe(
       "insert:test",
+      // oxlint-disable-next-line require-await -- the handler fails with a rejected promise, as an async handler does
       async (row) => {
         seen.push(row.name);
-        if (row.name === "a" && fails-- > 0) {
-          throw new Error("not yet");
+        if (row.name === "a") {
+          const left = fails;
+          fails -= 1;
+          if (left > 0) {
+            throw new Error("not yet");
+          }
         }
       },
-      () => {},
+      () => {
+        // Nothing to do when it subscribes.
+      },
       (error) => errors.push(error.message)
     );
     await sql`insert into test (name) values ('a')`;
     await sql`insert into test (name) values ('b')`;
-    await until(() => seen.join() === "a,a,b", 6000);
+    await until(() => seen.join(",") === "a,a,b", 6000);
     await delay(50);
     await sub.end();
     return [
       "a,a,b not yet",
-      `${seen.join()} ${errors.join()}`,
+      `${seen.join(",")} ${errors.join(",")}`,
       await done("postgresjs_retry"),
     ];
   }
@@ -279,13 +301,15 @@ t(
   "subscribe confirms the slot only as far as handlers have finished",
   { timeout: 10 },
   async () => {
-    const { sql, done, replica } = await replicating("postgresjs_confirm"),
-      sub = replica();
-    let release,
-      calls = 0;
-    const blocked = new Promise((r) => (release = r));
+    const { sql, done, replica } = await replicating("postgresjs_confirm");
+    const sub = replica();
+    let calls = 0;
+    const { promise: blocked, resolve: release } = Promise.withResolvers();
 
-    await sub.subscribe("insert:test", () => (calls++, blocked));
+    await sub.subscribe("insert:test", () => {
+      calls += 1;
+      return blocked;
+    });
     const [{ lsn: before }] = await sql`select pg_current_wal_lsn() as lsn`;
     await sql`insert into test (name) values ('a')`;
     await until(() => calls === 1);
@@ -307,12 +331,12 @@ t(
   "subscribe gets truncate and the transaction of each change",
   { timeout: 10 },
   async () => {
-    const { sql, done } = await replicating(),
-      seen = [],
-      sub = postgres({
-        database: "postgres_js_test",
-        publications: "alltables",
-      });
+    const { sql, done } = await replicating();
+    const seen = [];
+    const sub = postgres({
+      database: "postgres_js_test",
+      publications: "alltables",
+    });
 
     await sub.subscribe("*:test", (row, info) => seen.push(info));
     await sql`insert into test (name) values ('a')`;
@@ -327,7 +351,7 @@ t(
         truncate.command,
         truncate.relation.table,
         truncate.restartIdentity,
-        /^[0-9A-F]+\/[0-9A-F]+$/.test(insert.lsn),
+        /^[0-9A-F]+\/[0-9A-F]+$/u.test(insert.lsn),
         insert.time instanceof Date && typeof insert.xid === "number",
       ].join(" "),
       await done(),
@@ -339,16 +363,20 @@ t(
   "subscribe with a persistent slot reconnects after the server ends it, without loss or repeats",
   { timeout: 10 },
   async () => {
-    const { sql, done, replica } = await replicating("postgresjs_reconnect"),
-      seen = [],
-      sub = replica();
+    const { sql, done, replica } = await replicating("postgresjs_reconnect");
+    const seen = [];
+    const sub = replica();
     let subscribed = 0;
 
     await sub.subscribe(
       "insert:test",
       (row) => seen.push(row.name),
-      () => subscribed++,
-      () => {}
+      () => {
+        subscribed += 1;
+      },
+      () => {
+        // The error of the ended connection is expected.
+      }
     );
     await sql`insert into test (name) values ('a')`;
     await until(() => seen.length === 1);
@@ -360,7 +388,7 @@ t(
     await sub.end();
     return [
       "a,b 2",
-      `${seen.join()} ${subscribed}`,
+      `${seen.join(",")} ${subscribed}`,
       await done("postgresjs_reconnect"),
     ];
   }
@@ -370,48 +398,49 @@ t(
   "subscribe does not pile up listeners across reconnects (#1087)",
   { timeout: 20 },
   async () => {
-    const until = async (fn) => {
-      while (!fn()) {
-        await delay(20);
-      }
-    };
     const sql = postgres({
       database: "postgres_js_test",
-      publications: "alltables",
       fetch_types: false,
+      publications: "alltables",
     });
     await sql.unsafe(
       "drop publication if exists alltables; create publication alltables for all tables"
     );
     await sql`create table test (id serial primary key, name text)`;
 
-    const warnings = [],
-      onwarning = (x) => warnings.push(x.name),
-      result = [];
+    const warnings = [];
+    const onwarning = (x) => warnings.push(x.name);
+    const result = [];
     const seen = { subscribes: 0 };
     process.on("warning", onwarning);
 
     const { unsubscribe, sql: subscribeSql } = await sql.subscribe(
       "insert:test",
       (row) => result.push(row.name),
-      () => seen.subscribes++,
-      () => {}
+      () => {
+        seen.subscribes += 1;
+      },
+      () => {
+        // The connections are closed on purpose.
+      }
     );
 
-    for (let i = 1; i <= 12; i++) {
+    for (let i = 1; i <= 12; i += 1) {
       const before = seen.subscribes;
+      // oxlint-disable-next-line no-await-in-loop -- each close waits for the reconnect before it
       await subscribeSql.close();
-      await until(() => seen.subscribes !== before);
+      // oxlint-disable-next-line no-await-in-loop -- each close waits for the reconnect before it
+      await untilTrue(() => seen.subscribes !== before);
     }
 
     await sql`insert into test (name) values ('after')`;
-    await until(() => result.length);
+    await untilTrue(() => result.length);
     await unsubscribe();
     process.off("warning", onwarning);
 
     return [
       "13 after",
-      `${seen.subscribes} ${result.join()}${warnings.join()}`,
+      `${seen.subscribes} ${result.join(",")}${warnings.join(",")}`,
       await sql`drop table test`,
       await sql`drop publication alltables`,
       await sql.end(),
@@ -458,11 +487,17 @@ t(
 t("subscribe without publications rejects each time it is called", async () => {
   const sql = postgres({ database: "postgres_js_test", publications: "" });
   const errors = await Promise.all(
-    [1, 2].map(() => sql.subscribe("*", () => {}).catch((e) => e.message))
+    [1, 2].map(() =>
+      sql
+        .subscribe("*", () => {
+          // It rejects before any change arrives.
+        })
+        .catch((subscribeError) => subscribeError.message)
+    )
   );
   return [
     "Missing publication names,Missing publication names",
-    errors.join(),
+    errors.join(","),
     await sql.end(),
   ];
 });
@@ -471,12 +506,12 @@ t(
   "subscribe calls every handler of an event, until each unsubscribes",
   { timeout: 10 },
   async () => {
-    const { sql, done } = await replicating(),
-      sub = postgres({
-        database: "postgres_js_test",
-        publications: "alltables",
-      }),
-      seen = [];
+    const { sql, done } = await replicating();
+    const sub = postgres({
+      database: "postgres_js_test",
+      publications: "alltables",
+    });
+    const seen = [];
 
     const a = await sub.subscribe("insert:test", (row) =>
       seen.push(`a${row.id}`)
@@ -489,17 +524,17 @@ t(
     await until(() => seen.length === 3);
     await delay(50);
     await sub.end();
-    return ["a1,b1,b2", seen.join(), await done()];
+    return ["a1,b1,b2", seen.join(","), await done()];
   }
 );
 
-async function failing(onerror) {
-  const { sql, done } = await replicating(),
-    { user } = sql.options,
-    seen = [],
-    errors = [];
-  let fail = false,
-    subscribes = 0;
+const failing = async (onerror) => {
+  const { sql, done } = await replicating();
+  const { user } = sql.options;
+  const seen = [];
+  const errors = [];
+  let fail = false;
+  let subscribes = 0;
 
   const sub = postgres({
     database: "postgres_js_test",
@@ -516,7 +551,9 @@ async function failing(onerror) {
   const { sql: replication } = await sub.subscribe(
     "insert:test",
     (row) => seen.push(row.name),
-    () => subscribes++,
+    () => {
+      subscribes += 1;
+    },
     onerror && ((error) => errors.push(error.message))
   );
   fail = true;
@@ -528,8 +565,8 @@ async function failing(onerror) {
   await until(() => seen.length);
   await sub.end();
   await done();
-  return `${seen.join()} ${errors[0] || console.error.calls}`;
-}
+  return `${seen.join(",")} ${errors[0] || console.error.calls}`;
+};
 
 t(
   "subscribe reports a failed reconnect to onerror and retries",
@@ -541,7 +578,7 @@ t(
   "subscribe logs a failed reconnect when no subscription has onerror",
   { timeout: 10 },
   async () => {
-    const error = console.error;
+    const { error } = console;
     console.error = (...xs) => (console.error.calls = xs[1] && xs[1].message);
     try {
       return ["after no user now", await failing(false)];
@@ -555,16 +592,16 @@ t(
   "subscribe confirms its position to the server on an interval",
   { timeout: 10 },
   async () => {
-    const { sql, done } = await replicating(),
-      seen = [],
-      sub = postgres({
-        database: "postgres_js_test",
-        publications: "alltables",
-        timers: {
-          ...sql.options.timers,
-          setTimeout: (fn, ms) => setTimeout(fn, ms === 10_000 ? 50 : ms),
-        },
-      });
+    const { sql, done } = await replicating();
+    const seen = [];
+    const sub = postgres({
+      database: "postgres_js_test",
+      publications: "alltables",
+      timers: {
+        ...sql.options.timers,
+        setTimeout: (fn, ms) => setTimeout(fn, ms === 10_000 ? 50 : ms),
+      },
+    });
 
     await sub.subscribe("insert:test", (row) => seen.push(row.name));
     await sql`insert into test (name) values ('a')`;
@@ -575,7 +612,7 @@ t(
     select bool_or(confirmed_flush_lsn >= ${lsn}::pg_lsn) as confirmed from pg_replication_slots where slot_name like 'postgresjs_%'
   `;
     await sub.end();
-    return ["a true", `${seen.join()} ${confirmed}`, await done()];
+    return ["a true", `${seen.join(",")} ${confirmed}`, await done()];
   }
 );
 
@@ -583,19 +620,19 @@ t(
   "subscribe gives unchanged TOAST values as undefined, transforms values and reports a throwing handler",
   { timeout: 30 },
   async () => {
-    const { sql, done } = await replicating(),
-      seen = [],
-      errors = [],
-      sub = postgres({
-        database: "postgres_js_test",
-        publications: "alltables",
-        transform: {
-          value: {
-            from: (x, column) =>
-              column.name === "name" && x ? x.toUpperCase() : x,
-          },
+    const { sql, done } = await replicating();
+    const seen = [];
+    const errors = [];
+    const sub = postgres({
+      database: "postgres_js_test",
+      publications: "alltables",
+      transform: {
+        value: {
+          from: (x, column) =>
+            column.name === "name" && x ? x.toUpperCase() : x,
         },
-      });
+      },
+    });
 
     await sql`alter table test add column big text`;
     await sub.subscribe("update:test", (row) =>
@@ -606,20 +643,23 @@ t(
       () => {
         throw new Error("sync");
       },
-      () => {},
-      (e) => errors.push(e.message)
+      () => {
+        // Nothing to do when it subscribes.
+      },
+      (error) => errors.push(error.message)
     );
     await sql`insert into test (name, big) values ('a', (select string_agg(md5(random()::text), '') from generate_series(1, 1000)))`;
     await sql`update test set name = 'b'`;
     await until(
       () => seen.length && errors.length,
       20_000,
+      // oxlint-disable-next-line sort-keys -- the order the timeout message shows the state in
       () => JSON.stringify({ seen, errors })
     );
     await sub.end();
     return [
       "B undefined sync",
-      `${seen.join()} ${errors.join()}`,
+      `${seen.join(",")} ${errors.join(",")}`,
       await done(),
     ];
   }
@@ -629,20 +669,20 @@ t(
   "subscribe gives a column named __proto__ as an own property of the row",
   { timeout: 10 },
   async () => {
-    const { sql, done } = await replicating(),
-      sub = postgres({
-        database: "postgres_js_test",
-        publications: "alltables",
-      }),
-      seen = [];
+    const { sql, done } = await replicating();
+    const sub = postgres({
+      database: "postgres_js_test",
+      publications: "alltables",
+    });
+    const seen = [];
 
     await sql`alter table test add column "__proto__" json`;
     await sub.subscribe("insert:test", (row) => seen.push(row));
     await sql`insert into test (name, "__proto__") values ('a', '{"isAdmin": true}')`;
     await until(() => seen.length);
     await sub.end();
-    const [row] = seen,
-      own = Object.getOwnPropertyDescriptor(row, "__proto__");
+    const [row] = seen;
+    const own = Object.getOwnPropertyDescriptor(row, "__proto__");
     return [
       "undefined true true",
       [

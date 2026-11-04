@@ -3,15 +3,20 @@ import net from "node:net";
 import { postgres, sql, options, delay, idle_timeout } from "./setup.js";
 import { t } from "./test.js";
 
+const noop = () => {
+  // The rejection is expected; what follows it is tested.
+};
+
 t("Ensure reserve on connection throws proper error", async () => {
-  const sql = postgres({
+  const db = postgres({
+    idle_timeout,
     socket: () => {
+      // oxlint-disable-next-line no-throw-literal -- the test is about a thrown value that is not an Error
       throw "wat";
     },
-    idle_timeout,
   });
 
-  return ["wat", await sql.reserve().catch((e) => e)];
+  return ["wat", await db.reserve().catch((error) => error)];
 });
 
 t("reserve connection", async () => {
@@ -41,41 +46,41 @@ t("arrays in reserved connection", async () => {
 });
 
 t("Ensure reserve on query throws proper error", async () => {
-  const sql = postgres({ idle_timeout });
-  const reserved = await sql.reserve();
+  const db = postgres({ idle_timeout });
+  const reserved = await db.reserve();
   const [{ x }] = await reserved`select 'wat' as x`;
 
   return ["wat", x, reserved.release()];
 });
 
 t("reserve with fetch_types: false on a cold pool", async () => {
-  const sql = postgres({ ...options, fetch_types: false });
-  const reserved = await sql.reserve();
+  const db = postgres({ ...options, fetch_types: false });
+  const reserved = await db.reserve();
   const [{ x }] = await reserved`select 1 as x`;
   reserved.release();
-  await sql.end();
+  await db.end();
   return [1, x];
 });
 
 t("end() resolves after reserve and release", async () => {
-  const sql = postgres(options);
-  const reserved = await sql.reserve();
+  const db = postgres(options);
+  const reserved = await db.reserve();
   reserved.release();
-  return ["ended", await sql.end().then(() => "ended")];
+  return ["ended", await db.end().then(() => "ended")];
 });
 
 t(
   "end() resolves when a reserved connection is released after end was called (#1262)",
   async () => {
-    const sql = postgres({ ...options, max: 2 });
-    const reserved = await sql.reserve();
+    const db = postgres({ ...options, max: 2 });
+    const reserved = await db.reserve();
     await reserved`select 1`;
-    const ended = sql.end();
+    const ended = db.end();
     await delay(10);
     reserved.release();
     return [
       "ended 0",
-      `${await ended.then(() => "ended")} ${sql.stats.connections}`,
+      `${await ended.then(() => "ended")} ${db.stats.connections}`,
     ];
   }
 );
@@ -100,13 +105,16 @@ t("reserve after a terminated query", async () => {
   const pool = postgres(options);
   const reserved = await pool.reserve();
   const [{ pid }] = await reserved`select pg_backend_pid() as pid`;
-  const query = reserved`select pg_sleep(30)`.catch((e) => e);
+  const query = reserved`select pg_sleep(30)`.catch((queryError) => queryError);
+  const isSleeping = async () => {
+    const [{ sleeping }] =
+      await sql`select wait_event = 'PgSleep' as sleeping from pg_stat_activity where pid = ${pid}`;
+    return sleeping;
+  };
 
-  while (
-    !(
-      await sql`select wait_event = 'PgSleep' as sleeping from pg_stat_activity where pid = ${pid}`
-    )[0].sleeping
-  ) {
+  // oxlint-disable-next-line no-await-in-loop -- polling: each check waits for the one before
+  while (!(await isSleeping())) {
+    // oxlint-disable-next-line no-await-in-loop -- polling: each check waits for the one before
     await delay(1);
   }
 
@@ -124,15 +132,15 @@ t("reserve after a terminated query", async () => {
 t(
   "Reserved connection rejects queries after its backend is terminated",
   async () => {
-    const sql = postgres({ ...options, max: 2 });
-    const reserved = await sql.reserve();
+    const db = postgres({ ...options, max: 2 });
+    const reserved = await db.reserve();
     const [{ pid }] = await reserved`select pg_backend_pid() as pid`;
-    await sql`select pg_terminate_backend(${pid})`;
+    await db`select pg_terminate_backend(${pid})`;
     await delay(100);
-    const first = await reserved`select 1`.catch((e) => e.code);
-    const second = await reserved`select 2`.catch((e) => e.code);
+    const first = await reserved`select 1`.catch((error) => error.code);
+    const second = await reserved`select 2`.catch((error) => error.code);
     reserved.release();
-    await sql.end();
+    await db.end();
     return ["CONNECTION_CLOSED,CONNECTION_CLOSED", `${first},${second}`];
   }
 );
@@ -140,19 +148,19 @@ t(
 t(
   "Releasing a terminated reserved connection does not return it to the pool",
   async () => {
-    const sql = postgres({ ...options, max: 1 });
+    const db = postgres({ ...options, max: 1 });
     const killer = postgres(options);
-    const reserved = await sql.reserve();
+    const reserved = await db.reserve();
     const [{ pid }] = await reserved`select pg_backend_pid() as pid`;
     await killer`select pg_terminate_backend(${pid})`;
     await delay(100);
-    await reserved`select 1`.catch(() => {});
+    await reserved`select 1`.catch(noop);
     reserved.release();
     const [{ x }] = await Promise.race([
-      sql`select 1 as x`,
+      db`select 1 as x`,
       delay(2000).then(() => [{ x: "hung" }]),
     ]);
-    await Promise.all([sql.end(), killer.end()]);
+    await Promise.all([db.end(), killer.end()]);
     return [1, x];
   }
 );
@@ -169,21 +177,23 @@ t(
       upstream.on("error", () => x.destroy());
     });
 
-    await new Promise((r) => proxy.listen(0, "127.0.0.1", r));
+    const listening = Promise.withResolvers();
+    proxy.listen(0, "127.0.0.1", listening.resolve);
+    await listening.promise;
 
-    const sql = postgres({
-        ...options,
-        host: "127.0.0.1",
-        port: proxy.address().port,
-        max: 1,
-      }),
-      reserved = await sql.reserve();
+    const db = postgres({
+      ...options,
+      host: "127.0.0.1",
+      max: 1,
+      port: proxy.address().port,
+    });
+    const reserved = await db.reserve();
 
     await reserved`select 1`;
     downstream.end();
     await delay(50);
 
-    const code = await reserved`select 1`.catch((e) => e.code);
+    const code = await reserved`select 1`.catch((error) => error.code);
     reserved.release();
     proxy.close();
 
@@ -194,67 +204,69 @@ t(
 t(
   "A reserved connection released while its BEGIN is still unanswered is not handed to the next query in that transaction",
   async () => {
-    const sql = postgres({ ...options, max: 1 });
-    await sql`create table test (a int)`;
-    const reserved = await sql.reserve();
+    const db = postgres({ ...options, max: 1 });
+    await db`create table test (a int)`;
+    const reserved = await db.reserve();
     const begin = reserved`begin`.execute();
     const insert = reserved`insert into test values (1)`.execute();
-    begin.catch(() => {});
-    insert.catch(() => {});
-    await new Promise((r) => setTimeout(r, 0));
+    begin.catch(noop);
+    insert.catch(noop);
+    const tick = Promise.withResolvers();
+    setTimeout(tick.resolve, 0);
+    await tick.promise;
     reserved.release();
-    const pooled = await sql`insert into test values (2)`.then(
+    const pooled = await db`insert into test values (2)`.then(
       (x) => x.command,
-      (e) => e.code
+      (error) => error.code
     );
     const leased = [
       await begin.then(
         (x) => x.command,
-        (e) => e.code
+        (error) => error.code
       ),
       await insert.then(
         (x) => x.command,
-        (e) => e.code
+        (error) => error.code
       ),
     ];
-    const rows = (await sql`select array_agg(a order by a) as a from test`)[0]
-      .a;
+    const [{ a: rows }] =
+      await db`select array_agg(a order by a) as a from test`;
     return [
       "INSERT BEGIN,INSERT [2]",
-      `${pooled} ${leased.join()} ${JSON.stringify(rows)}`,
-      await sql`drop table test`,
-      await sql.end(),
+      `${pooled} ${leased.join(",")} ${JSON.stringify(rows)}`,
+      await db`drop table test`,
+      await db.end(),
     ];
   }
 );
 
 t("reserve and begin after end reject with CONNECTION_ENDED", async () => {
-  const sql = postgres({ ...options });
-  await sql`select 1`;
-  await sql.end();
+  const db = postgres({ ...options });
+  await db`select 1`;
+  await db.end();
   const codes = [
-    await sql.reserve().then(
+    await db.reserve().then(
       () => "ok",
-      (e) => e.code
+      (error) => error.code
     ),
-    await sql
+    await db
       .begin(() => 1)
       .then(
         () => "ok",
-        (e) => e.code
+        (error) => error.code
       ),
   ];
   return ["CONNECTION_ENDED CONNECTION_ENDED", codes.join(" ")];
 });
 
 t("Releasing a reserved connection twice releases it once", async () => {
-  const sql = postgres({ ...options, max: 1 });
-  const reserved = await sql.reserve();
+  const db = postgres({ ...options, max: 1 });
+  const reserved = await db.reserve();
   reserved.release();
   reserved.release();
   const [[a], [b]] = await Promise.all([
-    sql`select 1 as x`,
-    sql.reserve().then((r) => r`select 2 as x`.finally(r.release)),
+    db`select 1 as x`,
+    db.reserve().then((r) => r`select 2 as x`.finally(r.release)),
   ]);
-  return ["1 2", `${a.x} ${b.x}`, await sql.end()];
+  return ["1 2", `${a.x} ${b.x}`, await db.end()];
 });

@@ -1,23 +1,28 @@
-export function Writer(size = 16_384) {
-  let b = Buffer.allocUnsafe(size),
-    i = 0,
-    at = 0;
+export const Writer = (size = 16_384) => {
+  let b = Buffer.allocUnsafe(size);
+  let i = 0;
+  let at = 0;
+
+  const fit = (n) => {
+    if (b.length - i >= n) {
+      return;
+    }
+
+    const prev = b;
+    b = Buffer.allocUnsafe(Math.max(size, prev.length * 2, i + n));
+    prev.copy(b, 0, 0, i);
+  };
 
   const w = {
-    get length() {
-      return i;
-    },
-    type(x) {
-      fit(5);
-      at = i;
-      b[i] = x;
-      i += 5;
-      return w;
-    },
-    untyped() {
-      fit(4);
-      at = i;
-      i += 4;
+    bytes(x) {
+      if (typeof x === "string") {
+        fit(x.length * 3);
+        i += b.write(x, i);
+      } else {
+        fit(x.length);
+        b.set(x, i);
+        i += x.length;
+      }
       return w;
     },
     end() {
@@ -28,21 +33,64 @@ export function Writer(size = 16_384) {
       b.writeInt32BE(i - at, at);
       return w;
     },
+    i16(x) {
+      fit(2);
+      b.writeInt16BE(x, i);
+      i += 2;
+      return w;
+    },
+    i32(x) {
+      fit(4);
+      b.writeInt32BE(x, i);
+      i += 4;
+      return w;
+    },
+    get length() {
+      return i;
+    },
     str(x) {
       fit(x.length * 3 + 1);
       i += b.write(x, i);
-      b[i++] = 0;
+      b[i] = 0;
+      i += 1;
       return w;
     },
-    bytes(x) {
-      if (typeof x === "string") {
-        fit(x.length * 3);
-        i += b.write(x, i);
-      } else {
-        fit(x.length);
-        b.set(x, i);
-        i += x.length;
+    take() {
+      const out = i < 4096 ? Buffer.from(b.subarray(0, i)) : b.subarray(0, i);
+      if (i >= 4096) {
+        b = Buffer.allocUnsafe(size);
       }
+      at = 0;
+      i = 0;
+      return out;
+    },
+    truncate(n) {
+      i = n;
+      return w;
+    },
+    type(x) {
+      fit(5);
+      at = i;
+      b[i] = x;
+      i += 5;
+      return w;
+    },
+    u16(x) {
+      fit(2);
+      b.writeUInt16BE(x, i);
+      i += 2;
+      return w;
+    },
+    u8(x) {
+      fit(1);
+      b[i] = x;
+      i += 1;
+      return w;
+    },
+    untyped() {
+      fit(4);
+      at = i;
+      i += 4;
       return w;
     },
     value(x) {
@@ -55,69 +103,26 @@ export function Writer(size = 16_384) {
       b.writeInt32BE(i - n - 4, n);
       return w;
     },
-    u8(x) {
-      fit(1);
-      b[i++] = x;
-      return w;
-    },
-    i16(x) {
-      fit(2);
-      b.writeInt16BE(x, i);
-      i += 2;
-      return w;
-    },
-    u16(x) {
-      fit(2);
-      b.writeUInt16BE(x, i);
-      i += 2;
-      return w;
-    },
-    i32(x) {
-      fit(4);
-      b.writeInt32BE(x, i);
-      i += 4;
-      return w;
-    },
-    truncate(n) {
-      i = n;
-      return w;
-    },
-    take() {
-      const out = i < 4096 ? Buffer.from(b.subarray(0, i)) : b.subarray(0, i);
-      i >= 4096 && (b = Buffer.allocUnsafe(size));
-      i = at = 0;
-      return out;
-    },
   };
 
   return w;
-
-  function fit(n) {
-    if (b.length - i >= n) {
-      return;
-    }
-
-    const prev = b;
-    b = Buffer.allocUnsafe(Math.max(size, prev.length * 2, i + n));
-    prev.copy(b, 0, 0, i);
-  }
-}
+};
 
 const own = Writer(1024);
 
-const S = 83,
-  H = 72,
-  X = 88,
-  c = 99,
-  Q = 81,
-  p = 112,
-  d = 100,
-  f = 102,
-  D = 68,
-  C = 67,
-  E = 69,
-  P = 80,
-  B = 66;
+const S = 83;
+const H = 72;
+const X = 88;
+const c = 99;
+const Q = 81;
+const p = 112;
+const d = 100;
+const f = 102;
+const D = 68;
+const C = 67;
+const E = 69;
+const P = 80;
+const B = 66;
 
 export const sync = (w) => w.type(S).end();
 export const flush = (w) => w.type(H).end();
@@ -130,13 +135,92 @@ export const saslResponse = (w, x) => w.type(p).bytes(x).end();
 export const copyData = (w, x) => w.type(d).bytes(x).end();
 export const copyFail = (w, x) => w.type(f).str(x).end();
 export const describe = (w, kind, name) =>
-  w.type(D).u8(kind.charCodeAt(0)).str(name).end();
+  w.type(D).u8(kind.codePointAt(0)).str(name).end();
 export const close = (w, kind, name) =>
-  w.type(C).u8(kind.charCodeAt(0)).str(name).end();
+  w.type(C).u8(kind.codePointAt(0)).str(name).end();
 export const execute = (w, portal, rows = 0) =>
   w.type(E).str(portal).i32(rows).end();
 export const cancel = (w, pid, secret) =>
   w.untyped().i32(80_877_102).i32(pid).i32(secret).endUntyped();
+
+const unbroken = (k, x) => {
+  if (x.includes("\0")) {
+    throw Object.assign(
+      new Error(`The connection parameter ${k} contains a NUL character`),
+      { code: "NUL_CHARACTER" }
+    );
+  }
+
+  return x;
+};
+
+export const startup = (w, parameters) => {
+  w.untyped().i32(196_608);
+  for (const k of Object.keys(parameters)) {
+    if (parameters[k]) {
+      w.str(unbroken(k, k)).str(unbroken(k, `${parameters[k]}`));
+    }
+  }
+
+  return w.u8(0).endUntyped();
+};
+
+export const sasl = (w, mechanism, initial) =>
+  w.type(p).str(mechanism).i32(Buffer.byteLength(initial)).bytes(initial).end();
+
+export const parse = (w, name, text, oids = []) => {
+  w.type(P).str(name).str(text).u16(oids.length);
+  for (const oid of oids) {
+    // oxlint-disable-next-line unicorn/prefer-math-trunc -- ToInt32: an oid above 2^31 must wrap to the signed value the wire takes
+    w.i32(oid | 0);
+  }
+
+  return w.end();
+};
+
+export const bind = (
+  w,
+  portal,
+  name,
+  values = [],
+  formats = [],
+  resultFormats = []
+) => {
+  w.type(B).str(portal).str(name).i16(formats.length);
+  for (const format of formats) {
+    w.i16(format);
+  }
+
+  w.u16(values.length);
+  for (const x of values) {
+    w.value(x);
+  }
+
+  w.i16(resultFormats.length);
+  for (const format of resultFormats) {
+    w.i16(format);
+  }
+
+  return w.end();
+};
+
+export const run = (w, portal, name, values, rows, flushing, formats) => {
+  bind(w, portal, name, values, undefined, formats || undefined);
+  execute(w, portal, rows);
+  return flushing ? flush(w) : sync(w);
+};
+
+const one =
+  (fn) =>
+  (...xs) => {
+    try {
+      fn(own, ...xs);
+    } catch (writeError) {
+      own.truncate(0);
+      throw writeError;
+    }
+    return own.take();
+  };
 
 export const Sync = one(sync);
 export const Flush = one(flush);
@@ -158,153 +242,44 @@ export const Parse = one(parse);
 export const Bind = one(bind);
 export const Run = one(run);
 
-function one(fn) {
-  return (...xs) => {
-    try {
-      fn(own, ...xs);
-    } catch (error) {
-      own.truncate(0);
-      throw error;
-    }
-    return own.take();
-  };
-}
-
-export function startup(w, parameters) {
-  w.untyped().i32(196_608);
-  for (const k in parameters) {
-    parameters[k] && w.str(unbroken(k, k)).str(unbroken(k, `${parameters[k]}`));
-  }
-
-  return w.u8(0).endUntyped();
-}
-
-function unbroken(k, x) {
-  if (x.indexOf("\0") !== -1) {
-    throw Object.assign(
-      new Error(`The connection parameter ${k} contains a NUL character`),
-      { code: "NUL_CHARACTER" }
-    );
-  }
-
-  return x;
-}
-
-export function sasl(w, mechanism, initial) {
-  return w
-    .type(p)
-    .str(mechanism)
-    .i32(Buffer.byteLength(initial))
-    .bytes(initial)
-    .end();
-}
-
-export function parse(w, name, text, oids = []) {
-  w.type(P).str(name).str(text).u16(oids.length);
-  for (let j = 0; j < oids.length; j++) {
-    w.i32(oids[j] | 0);
-  }
-
-  return w.end();
-}
-
-export function bind(
-  w,
-  portal,
-  name,
-  values = [],
-  formats = [],
-  resultFormats = []
-) {
-  w.type(B).str(portal).str(name).i16(formats.length);
-  for (let j = 0; j < formats.length; j++) {
-    w.i16(formats[j]);
-  }
-
-  w.u16(values.length);
-  for (let j = 0; j < values.length; j++) {
-    w.value(values[j]);
-  }
-
-  w.i16(resultFormats.length);
-  for (let j = 0; j < resultFormats.length; j++) {
-    w.i16(resultFormats[j]);
-  }
-
-  return w.end();
-}
-
-export function run(w, portal, name, values, rows, flushing, formats) {
-  bind(w, portal, name, values, undefined, formats || undefined);
-  execute(w, portal, rows);
-  return flushing ? flush(w) : sync(w);
-}
-
 const largest = 0x40_00_00_00;
 
-export function Frames(onframe, shared = false, onerror = null) {
-  const chunks = [],
-    owned = new WeakSet();
+export const Frames = (onframe, shared = false, onerror = null) => {
+  const chunks = [];
+  const owned = new WeakSet();
 
-  let data = null,
-    owning = false,
-    at = 0,
-    part = null,
-    filled = 0,
-    paused = false,
-    running = false,
-    broken = false;
+  let data = null;
+  let owning = false;
+  let at = 0;
+  let part = null;
+  let filled = 0;
+  let paused = false;
+  let running = false;
+  let broken = false;
 
-  return {
-    push(x) {
-      if (broken) {
-        return;
-      }
-
-      chunks.push(shared && (paused || owning) ? own(x) : x);
-      run();
-    },
-    get paused() {
-      return paused;
-    },
-    owns(x) {
-      return !shared || owned.has(x);
-    },
-    own(x) {
-      owning = x;
-      x && settle();
-    },
-    pause() {
-      paused = true;
-      settle();
-    },
-    resume() {
-      paused = false;
-      run();
-    },
-  };
-
-  function own(x) {
+  const keep = (x) => {
     const copy = Buffer.from(x);
     owned.add(copy);
     return copy;
-  }
+  };
 
-  function settle() {
+  const settle = () => {
     if (!shared) {
       return;
     }
 
-    data &&
-      at < data.length &&
-      !owned.has(data) &&
-      ((data = own(data.subarray(at))), (at = 0));
-    for (let i = 0; i < chunks.length; i++) {
-      owned.has(chunks[i]) || (chunks[i] = own(chunks[i]));
+    if (data && at < data.length && !owned.has(data)) {
+      data = keep(data.subarray(at));
+      at = 0;
     }
-  }
+    for (let i = 0; i < chunks.length; i += 1) {
+      if (!owned.has(chunks[i])) {
+        chunks[i] = keep(chunks[i]);
+      }
+    }
+  };
 
-  function run() {
+  const consume = () => {
     if (running) {
       return;
     }
@@ -312,40 +287,48 @@ export function Frames(onframe, shared = false, onerror = null) {
     running = true;
     try {
       while (true) {
-        if (broken || paused || !((data && at < data.length) || next())) {
+        if (broken || paused || !((data && at < data.length) || nextChunk())) {
           break;
         }
-        part ? fill() : frame();
+        if (part) {
+          fill();
+        } else {
+          frame();
+        }
       }
     } finally {
       running = false;
     }
-  }
+  };
 
-  function invalid(length) {
+  const invalid = (length) => {
     if (length >= 4 && length <= largest) {
       return false;
     }
 
     broken = true;
     chunks.length = 0;
-    data = part = null;
-    at = filled = 0;
-    const error = Object.assign(
+    part = null;
+    data = null;
+    filled = 0;
+    at = 0;
+    const lengthError = Object.assign(
       new Error(`The server sent a message with an invalid length (${length})`),
       { code: "PROTOCOL_ERROR" }
     );
-    onerror && onerror(error);
+    if (onerror) {
+      onerror(lengthError);
+    }
     return true;
-  }
+  };
 
-  function next() {
+  const nextChunk = () => {
     data = chunks.shift() || null;
     at = 0;
     return data !== null;
-  }
+  };
 
-  function frame() {
+  const frame = () => {
     const left = data.length - at;
     if (left < 5) {
       return start(5);
@@ -364,16 +347,18 @@ export function Frames(onframe, shared = false, onerror = null) {
     const begin = at;
     at = end;
     onframe(data[begin], data, begin, end);
-  }
+  };
 
-  function start(length) {
+  const start = (length) => {
     part = Buffer.allocUnsafe(length);
-    shared && owned.add(part);
+    if (shared) {
+      owned.add(part);
+    }
     filled = data.copy(part, 0, at);
     at = data.length;
-  }
+  };
 
-  function fill() {
+  const fill = () => {
     const n = data.copy(part, filled, at, at + part.length - filled);
     filled += n;
     at += n;
@@ -382,53 +367,89 @@ export function Frames(onframe, shared = false, onerror = null) {
     }
 
     if (part.length === 5) {
-      const head = part,
-        length = head.readInt32BE(1);
+      const head = part;
+      const length = head.readInt32BE(1);
       if (invalid(length)) {
         return;
       }
 
       part = Buffer.allocUnsafe(1 + length);
-      shared && owned.add(part);
+      if (shared) {
+        owned.add(part);
+      }
       filled = head.copy(part);
-      return filled === part.length && done();
+      if (filled === part.length) {
+        done();
+      }
+      return;
     }
     done();
-  }
+  };
 
-  function done() {
+  const done = () => {
     const x = part;
     part = null;
     onframe(x[0], x, 0, x.length);
-  }
-}
+  };
 
-const errorFields = {
-  83: "severity_local",
-  86: "severity",
-  67: "code",
-  77: "message",
-  68: "detail",
-  72: "hint",
-  80: "position",
-  112: "internal_position",
-  113: "internal_query",
-  87: "where",
-  115: "schema_name",
-  116: "table_name",
-  99: "column_name",
-  100: "data_type_name",
-  110: "constraint_name",
-  70: "file",
-  76: "line",
-  82: "routine",
+  return {
+    own(x) {
+      owning = x;
+      if (x) {
+        settle();
+      }
+    },
+    owns(x) {
+      return !shared || owned.has(x);
+    },
+    pause() {
+      paused = true;
+      settle();
+    },
+    get paused() {
+      return paused;
+    },
+    push(x) {
+      if (broken) {
+        return;
+      }
+
+      chunks.push(shared && (paused || owning) ? keep(x) : x);
+      consume();
+    },
+    resume() {
+      paused = false;
+      consume();
+    },
+  };
 };
 
-export function error(x, start, end) {
+const errorFields = {
+  100: "data_type_name",
+  110: "constraint_name",
+  112: "internal_position",
+  113: "internal_query",
+  115: "schema_name",
+  116: "table_name",
+  67: "code",
+  68: "detail",
+  70: "file",
+  72: "hint",
+  76: "line",
+  77: "message",
+  80: "position",
+  82: "routine",
+  83: "severity_local",
+  86: "severity",
+  87: "where",
+  99: "column_name",
+};
+
+export const error = (x, start, end) => {
   const fields = {};
   for (let i = start + 5; i < end - 1;) {
     const zero = x.indexOf(0, i + 1);
-    fields[errorFields[x[i]] || String.fromCharCode(x[i])] = x.toString(
+    fields[errorFields[x[i]] || String.fromCodePoint(x[i])] = x.toString(
       "utf-8",
       i + 1,
       zero
@@ -438,7 +459,7 @@ export function error(x, start, end) {
   // The non-localized V field is optional: some servers and poolers send only S.
   fields.severity ||= fields.severity_local;
   return fields;
-}
+};
 
 export const text =
   typeof Buffer.prototype.utf8Slice === "function"
@@ -446,79 +467,85 @@ export const text =
     : (x, start, end) => x.toString("utf-8", start, end);
 
 const u32 = (x, i) =>
-    ((x[i] << 24) | (x[i + 1] << 16) | (x[i + 2] << 8) | x[i + 3]) >>> 0,
-  u16 = (x, i) => (x[i] << 8) | x[i + 1],
-  field = (name, table, number, type) => ({ name, table, number, type });
+  ((x[i] << 24) | (x[i + 1] << 16) | (x[i + 2] << 8) | x[i + 3]) >>> 0;
+const u16 = (x, i) => (x[i] << 8) | x[i + 1];
+const field = (name, table, number, type) => ({ name, number, table, type });
 
-export function rowDescription(x, start, end, make = field) {
-  const columns = new Array((x[start + 5] << 8) | x[start + 6]);
-  for (let i = start + 7, j = 0; j < columns.length; j++) {
+export const rowDescription = (x, start, end, make = field) => {
+  const count = (x[start + 5] << 8) | x[start + 6];
+  const columns = [];
+  for (let i = start + 7, j = 0; j < count; j += 1) {
     let zero = i;
     while (x[zero] !== 0) {
-      zero++;
+      zero += 1;
     }
-    columns[j] = make(
-      text(x, i, zero),
-      u32(x, zero + 1),
-      u16(x, zero + 5),
-      u32(x, zero + 7)
+    columns.push(
+      make(
+        text(x, i, zero),
+        u32(x, zero + 1),
+        u16(x, zero + 5),
+        u32(x, zero + 7)
+      )
     );
     i = zero + 19;
   }
   return columns;
-}
+};
 
-export function parameterDescription(x, start) {
-  const oids = new Array(x.readUInt16BE(start + 5));
-  for (let j = 0; j < oids.length; j++) {
-    oids[j] = x.readUInt32BE(start + 7 + j * 4);
+export const parameterDescription = (x, start) => {
+  const count = x.readUInt16BE(start + 5);
+  const oids = [];
+  for (let j = 0; j < count; j += 1) {
+    oids.push(x.readUInt32BE(start + 7 + j * 4));
   }
 
   return oids;
-}
+};
 
-export function commandComplete(x, start, end) {
+export const commandComplete = (x, start, end) => {
   const first = start + 5;
 
-  let e = end - 1,
-    count = null;
+  let e = end - 1;
+  let count = null;
 
   while (true) {
     let s = e - 1;
     while (s >= first && x[s] >= 48 && x[s] <= 57) {
-      s--;
+      s -= 1;
     }
     if (s === e - 1 || s < first || x[s] !== 32) {
       break;
     }
-    count === null && (count = +text(x, s + 1, e));
+    if (count === null) {
+      count = +text(x, s + 1, e);
+    }
     e = s;
   }
 
   return { command: text(x, first, e), count };
-}
+};
 
-export function readyForQuery(x, start) {
-  return String.fromCharCode(x[start + 5]);
-}
+// oxlint-disable-next-line unicorn/prefer-code-point -- past the end of a short message the byte is undefined, which fromCharCode reads as 0 and fromCodePoint throws on
+export const readyForQuery = (x, start) => String.fromCharCode(x[start + 5]);
 
-export function notification(x, start) {
+export const notification = (x, start) => {
   const zero = x.indexOf(0, start + 9);
   return {
-    pid: x.readInt32BE(start + 5),
     channel: x.toString("utf-8", start + 9, zero),
     payload: x.toString("utf-8", zero + 1, x.indexOf(0, zero + 1)),
+    pid: x.readInt32BE(start + 5),
   };
-}
+};
 
-export function parameterStatus(x, start) {
+export const parameterStatus = (x, start) => {
   const zero = x.indexOf(0, start + 5);
   return [
     x.toString("utf-8", start + 5, zero),
     x.toString("utf-8", zero + 1, x.indexOf(0, zero + 1)),
   ];
-}
+};
 
-export function backendKeyData(x, start) {
-  return { pid: x.readInt32BE(start + 5), secret: x.readInt32BE(start + 9) };
-}
+export const backendKeyData = (x, start) => ({
+  pid: x.readInt32BE(start + 5),
+  secret: x.readInt32BE(start + 9),
+});

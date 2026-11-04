@@ -9,151 +9,88 @@ import Result from "./result.js";
 export const slow = 100;
 export const notable = 5;
 
-const text = p.text,
-  noop = () => {},
-  ending =
-    /^\s*(commit|end|abort|rollback(?!\s+to\b)|prepare\s+transaction)\b/i,
-  limit = 1000,
-  refused = "@boelabs/postgres: query could not be built",
-  skip = Symbol("skip"),
-  held = Symbol("held"),
-  unknown = 100,
-  states = new WeakMap(),
-  after = 16;
+const { text } = p;
+const noop = () => {
+  // Takes a rejection or a throw that is handled elsewhere, or deliberately ignored.
+};
+const ending =
+  /^\s*(?:commit|end|abort|rollback(?!\s+to\b)|prepare\s+transaction)\b/iu;
+const limit = 1000;
+const refused = "@boelabs/postgres: query could not be built";
+const skip = Symbol("skip");
+const held = Symbol("held");
+const unknown = 100;
+const states = new WeakMap();
+const after = 16;
 
-let ids = 1,
-  compiles = true;
+let ids = 1;
+let compiles = true;
 
-export function Connection(ready, options, events) {
-  const { socket } = ready,
-    timers = options.timers,
-    defer = timers.nextTick || process.nextTick,
-    { transform } = options,
-    sent = [],
-    pending = [],
-    running = new Set(),
-    open = new Set(),
-    prepared = new Map(),
-    out = p.Writer(),
-    frames = p.Frames(
-      frame,
-      socket.shared,
-      (error) => ((connection.fatal = error), socket.destroy())
-    );
+export const Connection = (ready, options, events) => {
+  const { socket } = ready;
+  const { timers } = options;
+  const defer = timers.nextTick || process.nextTick;
+  const { transform } = options;
+  const sent = [];
+  const pending = [];
+  const running = new Set();
+  const open = new Set();
+  const prepared = new Map();
+  const out = p.Writer();
 
-  let blocker = null,
-    stash = null,
-    heard = timers.now(),
-    rolling = false,
-    fence = null,
-    drained = null,
-    status = ready.status,
-    flushing = false,
-    closed = null,
-    closing = null,
-    portals = 0,
-    traced = 0,
-    epoch = 0,
-    headSince = 0,
-    notables = 0;
+  let blocker = null;
+  let stash = null;
+  let heard = timers.now();
+  let rolling = false;
+  let fence = null;
+  let drained = null;
+  let { status } = ready;
+  let flushing = false;
+  let closed = null;
+  let closing = null;
+  let portals = 0;
+  let traced = 0;
+  let epoch = 0;
+  let headSince = 0;
+  let notables = 0;
 
-  const connection = {
-    id: ids++,
-    host: ready.host,
-    port: ready.port,
-    backend: ready.backend,
-    parameters: ready.parameters,
-    prepared,
-    lease: null,
-    get status() {
-      return status;
-    },
-    get inflight() {
-      return sent.length + pending.length;
-    },
-    get exclusive() {
-      return !!blocker && exclusive(blocker);
-    },
-    get copying() {
-      return !!blocker && blocker.streaming && blocker.open;
-    },
-    get closed() {
-      return closed;
-    },
-    get closing() {
-      return !!closing;
-    },
-    send,
-    batch,
-    simple,
-    describe,
-    local,
-    cancel,
-    close,
-    destroy,
-    go,
-    ref: () => socket.ref(),
-    unref: () => socket.unref(),
-    backlog,
-    heavy,
-    get notable() {
-      return notables > 0;
-    },
-  };
-
-  socket.ondata = (x) => ((heard = timers.now()), frames.push(x));
-  socket.ondrain = ondrain;
-  socket.onclose = onclose;
-  ready.rest && ready.rest.length && frames.push(ready.rest);
-  socket.resume();
-
-  return connection;
-
-  function ondrain() {
+  const ondrain = () => {
     const x = drained;
     drained = null;
-    x && x();
-  }
+    if (x) {
+      x();
+    }
+  };
 
-  function schedule(now) {
-    if (now || out.length >= 65_536) {
+  const schedule = (immediate) => {
+    if (immediate || out.length >= 65_536) {
       return flush();
     }
 
-    flushing || ((flushing = true), defer(flush));
+    if (!flushing) {
+      flushing = true;
+      defer(flush);
+    }
     return true;
-  }
+  };
 
-  function flush() {
+  const flush = () => {
     flushing = false;
     if (closed) {
       return (out.take(), true);
     }
 
     return out.length ? socket.write(out.take()) : true;
-  }
+  };
 
-  function holds(x) {
-    return (
-      x.describing ||
-      (x.gate && x.learn && !x.error) ||
-      (!!x.error && !x.done) ||
-      (x.flushing && !x.synced) ||
-      (x.streaming && x.open) ||
-      (x.alone && !x.done)
-    );
-  }
-
-  function exclusive(x) {
-    return x.flushing || x.streaming || x.alone;
-  }
-
-  function refresh() {
-    blocker && !holds(blocker) && (blocker = null);
+  const refresh = () => {
+    if (blocker && !holds(blocker)) {
+      blocker = null;
+    }
     release();
-  }
+  };
 
-  function queue(x) {
+  const queue = (x) => {
     if (closed) {
       return settleError(x, copy(closed));
     }
@@ -168,11 +105,14 @@ export function Connection(ready, options, events) {
       );
     }
 
-    x.query && (x.query.state = connection.backend);
+    if (x.query) {
+      x.query.state = connection.backend;
+    }
     if (fence) {
       pending.splice(pending.indexOf(fence), 0, x);
     } else if (x.ends && open.size) {
-      pending.push((fence = x));
+      fence = x;
+      pending.push(x);
     } else if (blocker || pending.length) {
       pending.push(x);
     } else {
@@ -180,17 +120,20 @@ export function Connection(ready, options, events) {
     }
 
     release();
-  }
+  };
 
-  function release() {
-    while (!blocker && pending.length && pending[0] !== fence) {
+  const release = () => {
+    while (pending.length && pending[0] !== fence) {
+      if (blocker) {
+        break;
+      }
       write(pending.shift());
     }
 
     schedule();
-  }
+  };
 
-  function write(x) {
+  const write = (x) => {
     if (x.kind === "local" && sent.length === 0) {
       return queueMicrotask(() => settle(x));
     }
@@ -207,63 +150,99 @@ export function Connection(ready, options, events) {
       out.truncate(mark);
       x.loose = false;
       blocker = sent.find((y) => y.gate && holds(y)) || null;
-      blocker &&
-        blocker.nosync &&
-        !blocker.flushed &&
-        ((blocker.flushed = true), p.flush(out), schedule());
+      if (blocker && blocker.nosync && !blocker.flushed) {
+        blocker.flushed = true;
+        p.flush(out);
+        schedule();
+      }
       return pending.unshift(x);
     }
 
-    if (result === skip) {
-      out.truncate(mark);
-      x.fresh = null;
-      x.parses = [];
-      x.portal = "";
-      x.describing = x.synced = x.flushing = x.open = false;
-      if (x.batch) {
-        x.entry = null;
-        p.parse(out, "", refused);
-        x.parses = [""];
-        abort(x);
-      } else if (!x.own || x.kind === "step" || !connection.lease) {
-        x.kind = "local";
-        x.cost >= notable && notables--;
-        x.cost = undefined;
-        return sent.length === 0
-          ? queueMicrotask(() => settle(x))
-          : sent.push(x);
-      } else {
-        x.kind = "simple";
-        x.text = refused;
-        x.results = [];
-        x.entry = null;
-        sync(x, true);
-      }
+    if (result === skip && dismiss(x, mark)) {
+      return;
     }
-    x.fresh && register(x.fresh);
-    x.portal && x.kind === "query" && open.add(x);
-    x.query && (x.query.active = sent.length === 0);
-    x.ends && epoch++;
+    if (x.fresh) {
+      register(x.fresh);
+    }
+    if (x.portal && x.kind === "query") {
+      open.add(x);
+    }
+    if (x.query) {
+      x.query.active = sent.length === 0;
+    }
+    if (x.ends) {
+      epoch += 1;
+    }
     x.epoch = epoch;
-    options.scheduler && sent.length === 0 && (headSince = timers.now());
+    if (options.scheduler && sent.length === 0) {
+      headSince = timers.now();
+    }
     sent.push(x);
-    holds(x) && (blocker = x);
-    x.trace && wrote(x);
-  }
+    if (holds(x)) {
+      blocker = x;
+    }
+    if (x.trace) {
+      wrote(x);
+    }
+  };
 
-  function sync(x, refuse) {
+  // An exchange whose write threw or was skipped. True when it settles without writing anything, so
+  // write must stop there.
+  const dismiss = (x, mark) => {
+    out.truncate(mark);
+    x.fresh = null;
+    x.parses = [];
+    x.portal = "";
+    x.open = false;
+    x.flushing = false;
+    x.synced = false;
+    x.describing = false;
+    if (x.batch) {
+      x.entry = null;
+      p.parse(out, "", refused);
+      x.parses = [""];
+      abort(x);
+    } else if (!x.own || x.kind === "step" || !connection.lease) {
+      x.kind = "local";
+      if (x.cost >= notable) {
+        notables -= 1;
+      }
+      x.cost = undefined;
+      if (sent.length === 0) {
+        queueMicrotask(() => settle(x));
+      } else {
+        sent.push(x);
+      }
+      return true;
+    } else {
+      x.kind = "simple";
+      x.text = refused;
+      x.results = [];
+      x.entry = null;
+      sync(x, true);
+    }
+    return false;
+  };
+
+  const sync = (x, refuse) => {
     if (x.synced) {
       return;
     }
 
     x.synced = true;
-    refuse ? p.query(out, refused) : p.sync(out);
+    if (refuse) {
+      p.query(out, refused);
+    } else {
+      p.sync(out);
+    }
     schedule();
-  }
+  };
 
-  function register(entry) {
+  const register = (entry) => {
     const current = prepared.get(entry.name);
-    current && prepared.delete(entry.name);
+    if (current) {
+      prepared.delete(entry.name);
+    }
     prepared.set(entry.name, entry);
     entry.owner.entry = entry;
     entry.owner.fresh = null;
@@ -278,121 +257,110 @@ export function Connection(ready, options, events) {
         return;
       }
     }
-  }
+  };
 
-  function drop(entry) {
-    prepared.get(entry.name) === entry && prepared.delete(entry.name);
-  }
+  const drop = (entry) => {
+    if (prepared.get(entry.name) === entry) {
+      prepared.delete(entry.name);
+    }
+  };
 
-  function send(query) {
-    const { statement } = query.wire,
-      x = Exchange("query", query, connection.lease, extended);
+  const send = (query) => {
+    const { statement } = query.wire;
+    const x = Exchange("query", query, connection.lease, extended);
 
     x.statement = statement;
     x.ends =
       statement.ends === undefined
         ? (statement.ends = ending.test(statement.text))
         : statement.ends;
-    options.scheduler && cost(x);
+    if (options.scheduler) {
+      cost(x);
+    }
     queue(x);
-  }
+  };
 
-  function batch(query, parts) {
+  const batch = (query, parts) => {
     const b = {
-      query,
-      parts,
-      results: new Array(parts.length),
-      settled: new Array(parts.length).fill(false),
-      left: parts.length,
+      aborted: null,
       error: null,
       index: -1,
-      aborted: null,
+      left: parts.length,
+      parts,
+      query,
+      results: Array.from({ length: parts.length }),
+      settled: Array.from({ length: parts.length }, () => false),
     };
 
-    parts.forEach((part, i) => {
-      part.resolve = (result) => batched(b, i, null, result);
-      part.reject = (error) => batched(b, i, error);
+    for (const [i, member] of parts.entries()) {
+      member.resolve = (result) => batched(b, i, null, result);
+      member.reject = (error) => batched(b, i, error);
       if (b.aborted) {
-        return batched(b, i, skipped(b.aborted, i));
+        batched(b, i, skipped(b.aborted, i));
+        continue;
       }
 
-      const x = Exchange("query", part, connection.lease, extended);
-      x.statement = part.wire.statement;
+      const x = Exchange("query", member, connection.lease, extended);
+      x.statement = member.wire.statement;
       x.ends =
         x.statement.ends === undefined
           ? (x.statement.ends = ending.test(x.statement.text))
           : x.statement.ends;
       x.batch = b;
       x.nosync = i < parts.length - 1;
-      options.scheduler && cost(x);
+      if (options.scheduler) {
+        cost(x);
+      }
       queue(x);
-    });
-  }
-
-  function batched(b, i, error, result) {
-    if (b.settled[i]) {
-      return;
     }
+  };
 
-    b.settled[i] = true;
-    b.left--;
-    error
-      ? (b.error === null || (i < b.index && !error.skipped)) &&
-        ((b.error = error), (b.index = i))
-      : (b.results[i] = result);
-
-    if (b.left) {
-      return;
-    }
-
-    const { query, parts, results } = b;
-    if (b.error) {
-      b.error.index = b.index;
-      parts.forEach((part, j) => {
-        Query.prototype.reject.call(
-          part,
-          j === b.index ? b.error : skipped(b.error, b.index)
-        );
-        part.catch(noop);
-      });
-      return query.reject(b.error);
-    }
-
-    parts.forEach((part, j) => Query.prototype.resolve.call(part, results[j]));
-    query.resolve(results);
-  }
-
-  function skipped(error, index) {
-    const x = copy(error);
-    x.index = index;
-    x.skipped = true;
-    return x;
-  }
-
-  function part(x) {
+  const part = (x) => {
     sent.shift();
-    options.scheduler && timed(x);
+    if (options.scheduler) {
+      timed(x);
+    }
     x.done = true;
     x.open = false;
-    x.trace && traced--;
-    blocker === x && (blocker = null);
+    if (x.trace) {
+      traced -= 1;
+    }
+    if (blocker === x) {
+      blocker = null;
+    }
     settle(x);
-    const next = sent[0];
+    const [next] = sent;
     if (next && next.query) {
       next.query.active = true;
-      next.cancel && turn(next);
+      if (next.cancel) {
+        turn(next);
+      }
     }
     release();
-  }
+  };
 
-  function abort(x) {
+  const abort = (x) => {
     if (x.aborted) {
       return;
     }
 
     x.aborted = true;
-    const b = x.batch,
-      error = x.own || x.error;
+    const b = x.batch;
+    const error = x.own || x.error;
+
+    const discard = (y) => {
+      if (y.entry && y.entry.owner === y && y.entry.state === "parsing") {
+        y.entry.state = "stale";
+      }
+      y.done = true;
+      if (y.trace) {
+        traced -= 1;
+      }
+      if (y.cost >= notable) {
+        notables -= 1;
+      }
+      settleError(y, skipped(error, b.parts.indexOf(y.query)));
+    };
 
     b.aborted = error;
     let synced = !x.nosync && x.synced;
@@ -402,64 +370,67 @@ export function Connection(ready, options, events) {
       if (y.batch === b) {
         sent.splice(i, 1);
         synced ||= !y.nosync && y.synced;
-        drop(y);
-        blocker === y && (blocker = null);
+        discard(y);
+        if (blocker === y) {
+          blocker = null;
+        }
       } else {
-        i++;
+        i += 1;
       }
     }
 
     for (let i = 0; i < pending.length;) {
       const y = pending[i];
-      y.batch === b ? (pending.splice(i, 1), drop(y)) : i++;
+      if (y.batch === b) {
+        pending.splice(i, 1);
+        discard(y);
+      } else {
+        i += 1;
+      }
     }
 
-    synced || p.sync(out);
+    if (!synced) {
+      p.sync(out);
+    }
     x.nosync = false;
     x.synced = true;
     schedule();
+  };
 
-    function drop(y) {
-      y.entry &&
-        y.entry.owner === y &&
-        y.entry.state === "parsing" &&
-        (y.entry.state = "stale");
-      y.done = true;
-      y.trace && traced--;
-      y.cost >= notable && notables--;
-      settleError(y, skipped(error, b.parts.indexOf(y.query)));
-    }
-  }
-
-  function cost(x) {
+  const cost = (x) => {
     const { query } = x;
-    query.cost &&
-      !query.cursorFn &&
-      !query.streaming &&
-      (x.cost = query.cost.est === undefined ? unknown : query.cost.est);
-    x.cost >= notable && notables++;
-  }
+    if (query.cost && !query.cursorFn && !query.streaming) {
+      x.cost = query.cost.est === undefined ? unknown : query.cost.est;
+    }
+    if (x.cost >= notable) {
+      notables += 1;
+    }
+  };
 
-  function timed(x) {
+  const timed = (x) => {
     const t = timers.now();
 
     if (x.cost !== undefined) {
-      x.cost >= notable && notables--;
-      const sample = t - headSince,
-        c = x.query.cost;
+      if (x.cost >= notable) {
+        notables -= 1;
+      }
+      const sample = t - headSince;
+      const c = x.query.cost;
       c.est =
         c.est === undefined || sample > c.est
           ? sample
           : c.est + (sample - c.est) * 0.1;
-      events.ontimed && events.ontimed(sample, t);
+      if (events.ontimed) {
+        events.ontimed(sample, t);
+      }
     }
 
     headSince = t;
-  }
+  };
 
-  function backlog(t) {
+  const backlog = (t) => {
     let w = 0;
-    for (let i = 0; i < sent.length; i++) {
+    for (let i = 0; i < sent.length; i += 1) {
       const e = sent[i].cost || 0;
       if (i === 0) {
         const elapsed = t - headSince;
@@ -469,51 +440,52 @@ export function Connection(ready, options, events) {
       }
     }
 
-    for (let i = 0; i < pending.length; i++) {
-      w += pending[i].cost || 0;
+    for (const x of pending) {
+      w += x.cost || 0;
     }
 
     return w;
-  }
+  };
 
-  function heavy() {
-    for (let i = 0; i < sent.length; i++) {
-      if (sent[i].cost >= slow) {
+  const heavy = () => {
+    for (const x of sent) {
+      if (x.cost >= slow) {
         return true;
       }
     }
 
-    for (let i = 0; i < pending.length; i++) {
-      if (pending[i].cost >= slow) {
+    for (const x of pending) {
+      if (x.cost >= slow) {
         return true;
       }
     }
 
     return false;
-  }
+  };
 
-  function extended(x) {
-    const { query } = x,
-      { built } = query.wire,
-      statement = x.statement,
-      name = statement.name,
-      current = name ? prepared.get(name) : null;
+  const extended = (x) => {
+    const { query } = x;
+    const { built } = query.wire;
+    const { statement } = x;
+    const { name } = statement;
+    const current = name ? prepared.get(name) : null;
 
     if (query.cursorFn) {
       x.rows = query.cursorRows;
-      x.portal = transaction() ? `c${portals++}` : "";
+      if (transaction()) {
+        x.portal = `c${portals}`;
+        portals += 1;
+      } else {
+        x.portal = "";
+      }
       x.flushing = !x.portal;
     }
 
-    x.streaming = x.open = !!query.streaming;
+    const streaming = !!query.streaming;
+    x.open = streaming;
+    x.streaming = streaming;
 
-    if (
-      current &&
-      current.state === "parsing" &&
-      current.oids === null &&
-      current.owner &&
-      !current.owner.error
-    ) {
+    if (unsettled(current)) {
       if (!current.owner.loose) {
         throw Errors.generic(
           "STATEMENT_PENDING",
@@ -544,8 +516,12 @@ export function Connection(ready, options, events) {
     }
 
     const typed = !inferred(built);
-    name && (x.fresh = Entry(name, x, typed ? built.oids : null));
-    current && p.close(out, "S", name);
+    if (name) {
+      x.fresh = Entry(name, x, typed ? built.oids : null);
+    }
+    if (current) {
+      p.close(out, "S", name);
+    }
     parse(x, name, statement.text, built.oids);
     p.describe(out, "S", name);
 
@@ -560,154 +536,146 @@ export function Connection(ready, options, events) {
       ? serialize(built.oids, built, x.fresh || {})
       : untyped(built);
     run(x, name);
-  }
+  };
 
-  function binaries(entry) {
+  const binaries = (entry) => {
     if (entry.binaryOf === entry.columns) {
       return entry.binary;
     }
 
-    const columns = entry.columns,
-      formats = new Array(columns.length);
+    const { columns } = entry;
+    const formats = [];
 
     let binary = null;
-    for (let i = 0; i < columns.length; i++) {
+    for (let i = 0; i < columns.length; i += 1) {
       const decode = events.binary(columns[i].type);
       formats[i] = decode ? 1 : 0;
-      decode && ((binary ||= columns.slice())[i] = { ...columns[i], decode });
+      if (decode) {
+        binary ||= [...columns];
+        binary[i] = { ...columns[i], decode };
+      }
     }
 
     entry.binaryOf = columns;
     return (entry.binary = binary && { columns: binary, formats });
-  }
+  };
 
-  function loose(x, built) {
+  const loose = (x, built) => {
     if (!events.plain || x.query.cursorFn || x.streaming) {
       return false;
     }
 
     const { oids, values } = built;
-    for (let i = 0; i < oids.length; i++) {
+    for (let i = 0; i < oids.length; i += 1) {
       if (
         !oids[i] &&
         values[i] !== null &&
-        !(typeof values[i] === "number" && isFinite(values[i]))
+        !(typeof values[i] === "number" && Number.isFinite(values[i]))
       ) {
         return false;
       }
     }
     return (x.loose = true);
-  }
+  };
 
-  function untyped(built) {
-    const { oids, values } = built,
-      out = new Array(values.length);
+  const untyped = (built) => {
+    const { oids, values } = built;
+    const texts = [];
 
-    for (let i = 0; i < values.length; i++) {
-      out[i] =
-        values[i] === null
-          ? null
-          : oids[i]
-            ? events.serializer(oids[i])(values[i])
-            : `${values[i]}`;
+    for (let i = 0; i < values.length; i += 1) {
+      if (values[i] === null) {
+        texts[i] = null;
+      } else if (oids[i]) {
+        texts[i] = events.serializer(oids[i])(values[i]);
+      } else {
+        texts[i] = `${values[i]}`;
+      }
     }
 
-    return out;
-  }
+    return texts;
+  };
 
-  function parse(x, name, text, oids) {
-    p.parse(out, name, text, oids);
+  const parse = (x, name, sql, oids) => {
+    p.parse(out, name, sql, oids);
     x.parses.push(name);
-  }
+  };
 
-  function run(x, name) {
+  const run = (x, name) => {
     const mark = out.length;
     try {
-      x.nosync
-        ? (p.bind(
-            out,
-            x.portal,
-            name,
-            x.values,
-            undefined,
-            x.formats || undefined
-          ),
-          p.execute(out, x.portal, x.rows))
-        : p.run(out, x.portal, name, x.values, x.rows, x.flushing, x.formats);
+      if (x.nosync) {
+        p.bind(
+          out,
+          x.portal,
+          name,
+          x.values,
+          undefined,
+          x.formats || undefined
+        );
+        p.execute(out, x.portal, x.rows);
+      } else {
+        p.run(out, x.portal, name, x.values, x.rows, x.flushing, x.formats);
+      }
     } catch (error) {
       out.truncate(mark);
       throw error;
     }
-    x.flushing || (x.synced = true);
+    if (!x.flushing) {
+      x.synced = true;
+    }
     const oids = x.entry
       ? x.entry.oids
       : x.params || (x.loose ? null : x.query.wire.built.oids);
-    oids ? debug(x.statement.text, x.values, oids) : (x.later = true);
-  }
-
-  function logged(item, oids) {
-    item.later &&
-      oids &&
-      ((item.later = false), debug(item.statement.text, item.values, oids));
-  }
-
-  function usable(entry, statement) {
-    return (
-      entry.oids !== null &&
-      (entry.state === "parsing" ||
-        (entry.state === "ready" && entry.version === statement.version))
-    );
-  }
-
-  function learned(entry, statement) {
-    const shape = `${entry.oids.join()}:${entry.columns.map((x) => x.type).join()}`;
-    if (statement.shape !== shape) {
-      statement.shape === undefined || statement.version++;
-      statement.shape = shape;
+    if (oids) {
+      debug(x.statement.text, x.values, oids);
+    } else {
+      x.later = true;
     }
-    entry.version = statement.version;
-  }
+  };
 
-  function inferred(built) {
-    for (let i = 0; i < built.oids.length; i++) {
-      if (!built.oids[i]) {
-        return true;
+  const logged = (item, oids) => {
+    if (item.later && oids) {
+      item.later = false;
+      debug(item.statement.text, item.values, oids);
+    }
+  };
+
+  const serialize = (oids, built, cache) => {
+    cache.serializers ||= oids.map(events.serializer);
+    const { serializers } = cache;
+    const { values } = built;
+    const serialized = [];
+
+    for (let i = 0; i < values.length; i += 1) {
+      serialized[i] = values[i] === null ? null : serializers[i](values[i]);
+      if (
+        !(
+          serialized[i] === null ||
+          serialized[i] === undefined ||
+          typeof serialized[i] === "string" ||
+          serialized[i] instanceof Uint8Array
+        )
+      ) {
+        Buffer.byteLength(serialized[i]);
       }
     }
-    return false;
-  }
 
-  function serialize(oids, built, cache) {
-    const serializers = (cache.serializers ||= oids.map(events.serializer)),
-      values = built.values,
-      out = new Array(values.length);
+    return serialized;
+  };
 
-    for (let i = 0; i < values.length; i++) {
-      out[i] = values[i] === null ? null : serializers[i](values[i]);
-      out[i] === null ||
-        out[i] === undefined ||
-        typeof out[i] === "string" ||
-        out[i] instanceof Uint8Array ||
-        Buffer.byteLength(out[i]);
-    }
+  const transaction = () =>
+    !!connection.lease && connection.lease.kind === "transaction";
 
-    return out;
-  }
-
-  function transaction() {
-    return !!connection.lease && connection.lease.kind === "transaction";
-  }
-
-  function described(x) {
+  const described = (x) => {
     x.describing = false;
-    const { built } = x.query.wire,
-      name = x.statement.name,
-      params = x.params || [],
-      columns = x.columns || [];
+    const { built } = x.query.wire;
+    const { name } = x.statement;
+    const params = x.params || [];
+    const columns = x.columns || [];
 
     try {
       if (x.verify) {
-        const previous = x.previous;
+        const { previous } = x;
         if (previous && same(previous, params, columns)) {
           if (x.original) {
             x.own = x.original;
@@ -715,76 +683,77 @@ export function Connection(ready, options, events) {
           }
         } else if (previous) {
           stale(previous);
-          x.statement.version++;
+          x.statement.version += 1;
         }
         x.values = serialize(params, built, {});
         return run(x, "");
       }
-      const entry = x.entry;
-      entry &&
-        ((entry.oids = params),
-        (entry.columns = columns),
-        learned(entry, x.statement));
+      const { entry } = x;
+      if (entry) {
+        entry.oids = params;
+        entry.columns = columns;
+        learned(entry, x.statement);
+      }
       x.values = serialize(params, built, entry || {});
       run(x, name);
     } catch (error) {
       x.own = error;
-      x.batch
-        ? (p.parse(out, "", refused), x.parses.push(""), abort(x))
-        : sync(x, !!connection.lease);
+      if (x.batch) {
+        p.parse(out, "", refused);
+        x.parses.push("");
+        abort(x);
+      } else {
+        sync(x, !!connection.lease);
+      }
     }
-  }
+  };
 
-  function same(entry, params, columns) {
-    const a = entry.oids || [],
-      b = entry.columns;
-
-    return (
-      !!b &&
-      a.length === params.length &&
-      params.every((x, i) => x === a[i]) &&
-      b.length === columns.length &&
-      columns.every((x, i) => x.type === b[i].type)
-    );
-  }
-
-  function describe(statement, oids, query) {
-    return new Promise((resolve, reject) => {
-      const x = Exchange("describe", null, connection.lease, (x) => {
+  const describe = (statement, oids, query) => {
+    const { promise, resolve, reject } = Promise.withResolvers();
+    // As in a promise's executor: whatever throws here rejects the promise.
+    try {
+      const x = Exchange("describe", null, connection.lease, (item) => {
         p.parse(out, "", statement.text, oids);
         p.describe(out, "S", "");
-        sync(x);
+        sync(item);
       });
       x.for = query || null;
       x.resolve = resolve;
       x.reject = reject;
       queue(x);
-    });
-  }
+    } catch (error) {
+      reject(error);
+    }
+    return promise;
+  };
 
-  function simple(query, sql) {
-    const x = Exchange("simple", query, connection.lease, (x) => {
+  const simple = (query, sql) => {
+    const x = Exchange("simple", query, connection.lease, (item) => {
       debug(sql, [], []);
       p.query(out, sql);
-      x.synced = true;
+      item.synced = true;
     });
     x.text = sql;
     x.results = [];
     x.ends = ending.test(sql);
-    x.streaming = x.open = !!query.streaming;
-    options.scheduler && cost(x);
+    const streaming = !!query.streaming;
+    x.open = streaming;
+    x.streaming = streaming;
+    if (options.scheduler) {
+      cost(x);
+    }
     queue(x);
-  }
+  };
 
-  function local(query, error) {
+  const local = (query, error) => {
     queue(
       Exchange("query", query, connection.lease, () => {
         throw error;
       })
     );
-  }
+  };
 
-  function cancel(query) {
+  const cancel = (query) => {
     if (query.parts) {
       return cancelBatch(query);
     }
@@ -810,12 +779,16 @@ export function Connection(ready, options, events) {
         Promise.resolve()
       );
     }
-    const i = pending.findIndex((x) => x.query === query || x.for === query);
+    const i = pending.findIndex((y) => y.query === query || y.for === query);
 
     if (i !== -1) {
       const [x] = pending.splice(i, 1);
-      x === fence && (fence = null);
-      x.cost >= notable && notables--;
+      if (x === fence) {
+        fence = null;
+      }
+      if (x.cost >= notable) {
+        notables -= 1;
+      }
       settleError(
         x,
         Errors.generic("57014", "canceling statement due to user request")
@@ -824,7 +797,7 @@ export function Connection(ready, options, events) {
       return Promise.resolve();
     }
 
-    const x = sent.find((x) => x.query === query || x.for === query);
+    const x = sent.find((y) => y.query === query || y.for === query);
     if (!x) {
       return Promise.resolve();
     }
@@ -838,12 +811,17 @@ export function Connection(ready, options, events) {
     }
 
     quiet(x);
-    return new Promise((resolve, reject) => (x.cancel = { resolve, reject }));
-  }
+    const { promise, resolve, reject } = Promise.withResolvers();
+    x.cancel = { reject, resolve };
+    return promise;
+  };
 
-  function turn(x) {
-    x.silence && (timers.clearTimeout(x.silence), (x.silence = null));
-    const go = () => {
+  const turn = (x) => {
+    if (x.silence) {
+      timers.clearTimeout(x.silence);
+      x.silence = null;
+    }
+    const fire = () => {
       x.silence = null;
       if (closed || x.done || sent[0] !== x) {
         return x.cancel.resolve();
@@ -853,58 +831,63 @@ export function Connection(ready, options, events) {
         return (expect(x), x.cancel.resolve());
       }
 
-      cancelling(x).then(x.cancel.resolve, x.cancel.reject);
+      // oxlint-disable-next-line promise/prefer-catch -- with .catch the canceller would hear of a rejection a tick later
+      return cancelling(x).then(x.cancel.resolve, x.cancel.reject);
     };
 
-    x.query && x.query.timedOut && options.query_timeout
-      ? (x.silence = timers.setTimeout(go, options.query_timeout * 1000))
-      : defer(go);
-  }
+    if (x.query && x.query.timedOut && options.query_timeout) {
+      x.silence = timers.setTimeout(fire, options.query_timeout * 1000);
+    } else {
+      defer(fire);
+    }
+  };
 
-  function quiet(x) {
+  const quiet = (x) => {
     if (!options.cancel_timeout || x.silence) {
       return;
     }
 
-    const ms = options.cancel_timeout * 1000,
-      check = () => {
-        x.silence = null;
-        const query = x.query || x.for;
-        if (closed || x.done || !query || query.settled) {
-          return;
-        }
+    const ms = options.cancel_timeout * 1000;
+    const check = () => {
+      x.silence = null;
+      const query = x.query || x.for;
+      if (closed || x.done || !query || query.settled) {
+        return;
+      }
 
-        const idle = timers.now() - heard;
-        idle >= ms
-          ? destroy(
-              Errors.generic(
-                "CANCEL_UNANSWERED",
-                `The server sent nothing within cancel_timeout (${
-                  options.cancel_timeout
-                } seconds) while a canceled query waited, so whether it ran is unknown`
-              )
-            )
-          : (x.silence = timers.setTimeout(check, ms - idle));
-      };
+      const silent = timers.now() - heard;
+      if (silent >= ms) {
+        destroy(
+          Errors.generic(
+            "CANCEL_UNANSWERED",
+            `The server sent nothing within cancel_timeout (${
+              options.cancel_timeout
+            } seconds) while a canceled query waited, so whether it ran is unknown`
+          )
+        );
+      } else {
+        x.silence = timers.setTimeout(check, ms - silent);
+      }
+    };
 
     x.silence = timers.setTimeout(check, ms);
-  }
+  };
 
-  function cancelling(x) {
+  const cancelling = (x) => {
     expect(x);
     return ready.cancel();
-  }
+  };
 
-  function expect(x) {
-    options.cancel_timeout &&
-      !x.unanswered &&
-      (x.unanswered = timers.setTimeout(
+  const expect = (x) => {
+    if (options.cancel_timeout && !x.unanswered) {
+      x.unanswered = timers.setTimeout(
         () => unanswered(x),
         options.cancel_timeout * 1000
-      ));
-  }
+      );
+    }
+  };
 
-  function unanswered(x) {
+  const unanswered = (x) => {
     x.unanswered = null;
     const query = x.batch ? x.batch.query : x.query || x.for;
     if (closed || (x.done && !x.batch) || !query || query.settled) {
@@ -920,64 +903,78 @@ export function Connection(ready, options, events) {
           `so whether it ran is unknown`
       )
     );
-  }
+  };
 
-  function answered(x) {
-    x.silence && (timers.clearTimeout(x.silence), (x.silence = null));
-    x.unanswered &&
-      (!x.batch || x.batch.query.settled) &&
-      (timers.clearTimeout(x.unanswered), (x.unanswered = null));
-  }
+  const answered = (x) => {
+    if (x.silence) {
+      timers.clearTimeout(x.silence);
+      x.silence = null;
+    }
+    if (x.unanswered && (!x.batch || x.batch.query.settled)) {
+      timers.clearTimeout(x.unanswered);
+      x.unanswered = null;
+    }
+  };
 
-  function cancelBatch(query) {
-    const x = sent.find((x) => x.batch && x.batch.query === query);
+  const cancelBatch = (query) => {
+    const x = sent.find((y) => y.batch && y.batch.query === query);
     if (x) {
-      return x === sent[0]
-        ? cancelling(x)
-        : new Promise((resolve, reject) => (x.cancel = { resolve, reject }));
+      if (x === sent[0]) {
+        return cancelling(x);
+      }
+      const { promise, resolve, reject } = Promise.withResolvers();
+      x.cancel = { reject, resolve };
+      return promise;
     }
 
-    const first = pending.find((x) => x.batch && x.batch.query === query);
-    if (first) {
-      first.own = Errors.generic(
+    const leading = pending.find((y) => y.batch && y.batch.query === query);
+    if (leading) {
+      leading.own = Errors.generic(
         "57014",
         "canceling statement due to user request"
       );
-      first.write = () => {
-        throw first.own;
+      leading.write = () => {
+        throw leading.own;
       };
     }
     return Promise.resolve();
-  }
+  };
 
-  function close() {
-    closing ||
-      (closing = new Promise((r) => {
-        connection.onended = r;
-        idle() && terminate();
-      }));
+  const close = () => {
+    if (!closing) {
+      const { promise, resolve, reject } = Promise.withResolvers();
+      // oxlint-disable-next-line unicorn/prefer-add-event-listener -- a plain object of ours with a single handler, not an event target
+      connection.onended = resolve;
+      // As in a promise's executor: a throw rejects the promise, which is only then set as closing.
+      try {
+        if (idle()) {
+          terminate();
+        }
+      } catch (error) {
+        reject(error);
+      }
+      closing = promise;
+    }
     return closing;
-  }
+  };
 
-  function idle() {
-    return sent.length === 0 && pending.length === 0;
-  }
+  const idle = () => sent.length === 0 && pending.length === 0;
 
-  function terminate() {
+  const terminate = () => {
     if (closed) {
       return connection.onended && connection.onended();
     }
 
     flush();
     socket.end(p.Terminate());
-  }
+  };
 
-  function destroy(error) {
+  const destroy = (failure) => {
     closing ||= Promise.resolve();
-    socket.destroy(error);
-  }
+    socket.destroy(failure);
+  };
 
-  function onclose(error) {
+  const onclose = (error) => {
     if (closed) {
       return;
     }
@@ -986,12 +983,10 @@ export function Connection(ready, options, events) {
     blocker = null;
     fence = null;
     notables = 0;
-    const head = sent[0],
-      failed =
-        head && head.error && head.error.severity === "FATAL"
-          ? head.error
-          : null,
-      fatal = connection.fatal || failed;
+    const [head] = sent;
+    const crashed =
+      head && head.error && head.error.severity === "FATAL" ? head.error : null;
+    const fatal = connection.fatal || crashed;
     connection.uncertain = !!(fatal && head && head.ends);
     closed = Errors.connection(
       closing ? "CONNECTION_DESTROYED" : "CONNECTION_CLOSED",
@@ -1000,46 +995,68 @@ export function Connection(ready, options, events) {
       ready.port
     );
     closed.cause = fatal || error || undefined;
-    sent.concat(pending).forEach((x) => x.cancel && x.cancel.resolve());
-    sent.splice(0).forEach((x) => {
-      x.stream && x.stream.destroy(closed);
-      x.own
-        ? settle(x)
-        : failed
-          ? settleError(x, x === head ? failed : copy(failed))
-          : settleError(x, copy(closed));
-    });
-    pending
-      .splice(0)
-      .forEach((x) => (x.own ? settle(x) : settleError(x, copy(closed))));
-    running.forEach(
-      (query) => query.settled || query.reject(decorate(query, copy(closed)))
-    );
-    running.clear();
+    abandon(head, crashed);
     open.clear();
-    connection.onended && connection.onended();
+    if (connection.onended) {
+      connection.onended();
+    }
     events.onclose(connection, closed);
-  }
+  };
 
-  function decorate(query, error) {
-    return queryError(error, query, options.debug);
-  }
+  // Settles everything that was waiting on the connection when it closed.
+  const abandon = (head, crashed) => {
+    for (const x of [...sent, ...pending]) {
+      if (x.cancel) {
+        x.cancel.resolve();
+      }
+    }
+    for (const x of sent.splice(0)) {
+      if (x.stream) {
+        x.stream.destroy(closed);
+      }
+      if (x.own) {
+        settle(x);
+      } else if (crashed) {
+        settleError(x, x === head ? crashed : copy(crashed));
+      } else {
+        settleError(x, copy(closed));
+      }
+    }
+    for (const x of pending.splice(0)) {
+      if (x.own) {
+        settle(x);
+      } else {
+        settleError(x, copy(closed));
+      }
+    }
+    for (const query of running) {
+      if (!query.settled) {
+        query.reject(decorate(query, copy(closed)));
+      }
+    }
+    running.clear();
+  };
 
-  function settleError(x, error) {
+  const decorate = (query, error) => queryError(error, query, options.debug);
+
+  const settleError = (x, error) => {
     answered(x);
-    x.kind === "describe"
-      ? x.reject(error)
-      : x.query && !x.query.settled && x.query.reject(decorate(x.query, error));
-  }
+    if (x.kind === "describe") {
+      x.reject(error);
+    } else if (x.query && !x.query.settled) {
+      x.query.reject(decorate(x.query, error));
+    }
+  };
 
-  function debug(text, values, oids) {
-    typeof options.debug === "function" &&
-      options.debug(connection.id, text, values, oids);
-  }
+  const debug = (sql, values, oids) => {
+    if (typeof options.debug === "function") {
+      options.debug(connection.id, sql, values, oids);
+    }
+  };
 
-  function wrote(x) {
-    const trace = x.trace;
-    traced++;
+  const wrote = (x) => {
+    const { trace } = x;
+    traced += 1;
     trace.query = x.text || x.statement.text;
     trace.statement = x.statement ? x.statement.name : "";
     trace.parameters = options.debug ? x.query.parameters : undefined;
@@ -1047,14 +1064,16 @@ export function Connection(ready, options, events) {
     trace.host = connection.host;
     trace.port = connection.port;
     trace.sent = now();
-  }
+  };
 
-  function first() {
-    const x = sent[0];
-    x && x.trace && x.trace.firstByte === null && (x.trace.firstByte = now());
-  }
+  const first = () => {
+    const [x] = sent;
+    if (x && x.trace && x.trace.firstByte === null) {
+      x.trace.firstByte = now();
+    }
+  };
 
-  function frame(type, x, start, end) {
+  const frame = (type, x, start, end) => {
     if (
       !events.typed &&
       stash === null &&
@@ -1071,9 +1090,9 @@ export function Connection(ready, options, events) {
     }
 
     dispatch(type, x, start, end);
-  }
+  };
 
-  function go() {
+  const go = () => {
     if (!stash) {
       return;
     }
@@ -1082,120 +1101,198 @@ export function Connection(ready, options, events) {
     dispatch(type, x, 0, x.length);
     stash = null;
     frames.resume();
-  }
+  };
 
-  function dispatch(type, x, start, end) {
-    traced && first();
-    try {
-      type === 68
-        ? DataRow(x, start)
-        : type === 100
-          ? CopyData(x, start, end)
-          : type === 90
-            ? ReadyForQuery(x, start)
-            : type === 67
-              ? CommandComplete(x, start, end)
-              : type === 50
-                ? BindComplete()
-                : type === 49
-                  ? ParseComplete()
-                  : type === 51
-                    ? null
-                    : type === 116
-                      ? ParameterDescription(x, start)
-                      : type === 84
-                        ? RowDescription(x, start)
-                        : type === 110
-                          ? NoData()
-                          : type === 69
-                            ? ErrorResponse(x, start, end)
-                            : type === 115
-                              ? PortalSuspended()
-                              : type === 73
-                                ? EmptyQueryResponse()
-                                : type === 65
-                                  ? NotificationResponse(x, start)
-                                  : type === 78
-                                    ? NoticeResponse(x, start, end)
-                                    : type === 83
-                                      ? ParameterStatus(x, start)
-                                      : type === 71
-                                        ? CopyInResponse()
-                                        : type === 72
-                                          ? CopyOutResponse()
-                                          : type === 87
-                                            ? CopyBothResponse()
-                                            : type === 99
-                                              ? CopyDone()
-                                              : type === 86
-                                                ? unsupported(
-                                                    "FunctionCallResponse"
-                                                  )
-                                                : type === 118
-                                                  ? unsupported(
-                                                      "NegotiateProtocolVersion"
-                                                    )
-                                                  : null;
-    } catch (error) {
-      const x = sent[0];
-      x ? fail(x, error) : destroy(error);
+  const dispatch = (type, x, start, end) => {
+    if (traced) {
+      first();
     }
-    blocker && !holds(blocker) && ((blocker = null), release());
-    out.length && schedule();
-  }
+    try {
+      handle(type, x, start, end);
+    } catch (error) {
+      const [head] = sent;
+      if (head) {
+        fail(head, error);
+      } else {
+        destroy(error);
+      }
+    }
+    if (blocker && !holds(blocker)) {
+      blocker = null;
+      release();
+    }
+    if (out.length) {
+      schedule();
+    }
+  };
 
-  function fail(x, error) {
+  // The messages of a query's flow, rows first since they are most of the traffic.
+  const handle = (type, x, start, end) => {
+    switch (type) {
+      case 68: {
+        DataRow(x, start);
+        break;
+      }
+      case 100: {
+        CopyData(x, start, end);
+        break;
+      }
+      case 90: {
+        ReadyForQuery(x, start);
+        break;
+      }
+      case 67: {
+        CommandComplete(x, start, end);
+        break;
+      }
+      case 50: {
+        BindComplete();
+        break;
+      }
+      case 49: {
+        ParseComplete();
+        break;
+      }
+      case 51: {
+        break;
+      }
+      case 116: {
+        ParameterDescription(x, start);
+        break;
+      }
+      case 84: {
+        RowDescription(x, start);
+        break;
+      }
+      case 110: {
+        NoData();
+        break;
+      }
+      case 69: {
+        ErrorResponse(x, start, end);
+        break;
+      }
+      default: {
+        handleOther(type, x, start, end);
+      }
+    }
+  };
+
+  const handleOther = (type, x, start, end) => {
+    switch (type) {
+      case 115: {
+        PortalSuspended();
+        break;
+      }
+      case 73: {
+        EmptyQueryResponse();
+        break;
+      }
+      case 65: {
+        NotificationResponse(x, start);
+        break;
+      }
+      case 78: {
+        NoticeResponse(x, start, end);
+        break;
+      }
+      case 83: {
+        ParameterStatus(x, start);
+        break;
+      }
+      case 71: {
+        CopyInResponse();
+        break;
+      }
+      case 72: {
+        CopyOutResponse();
+        break;
+      }
+      case 87: {
+        CopyBothResponse();
+        break;
+      }
+      case 99: {
+        CopyDone();
+        break;
+      }
+      case 86: {
+        unsupported("FunctionCallResponse");
+        break;
+      }
+      case 118: {
+        unsupported("NegotiateProtocolVersion");
+        break;
+      }
+      default:
+      // A message of any other type is ignored.
+    }
+  };
+
+  const fail = (x, error) => {
     x.error ||= error;
     x.describing = false;
     x.open = false;
-    x.batch ? abort(x) : sync(x);
-  }
+    if (x.batch) {
+      abort(x);
+    } else {
+      sync(x);
+    }
+  };
 
-  function unsupported(x) {
-    sent[0] && fail(sent[0], Errors.notSupported(x));
-  }
+  const unsupported = (x) => {
+    if (sent[0]) {
+      fail(sent[0], Errors.notSupported(x));
+    }
+  };
 
-  function ParseComplete() {
-    const x = sent[0],
-      name = x.parses.shift();
+  const ParseComplete = () => {
+    const [x] = sent;
+    const name = x.parses.shift();
 
-    name &&
+    if (
+      name &&
       x.entry &&
       x.entry.name === name &&
       x.entry.owner === x &&
-      x.entry.state === "parsing" &&
-      (x.entry.state = "ready");
-  }
+      x.entry.state === "parsing"
+    ) {
+      x.entry.state = "ready";
+    }
+  };
 
-  function BindComplete() {
-    const x = sent[0];
+  const BindComplete = () => {
+    const [x] = sent;
     x.bound = true;
     if (!x.columns && x.entry) {
       x.columns = x.entry.columns;
       x.result.columns = x.columns;
     }
-  }
+  };
 
-  function ParameterDescription(x, start) {
-    const item = sent[0];
+  const ParameterDescription = (x, start) => {
+    const [item] = sent;
     item.params = p.parameterDescription(x, start);
-    item.loose &&
+    if (
+      item.loose &&
       item.entry &&
       item.entry.owner === item &&
-      item.entry.oids === null &&
-      (item.entry.oids = item.params);
+      item.entry.oids === null
+    ) {
+      item.entry.oids = item.params;
+    }
     logged(item, item.params);
-  }
+  };
 
-  function RowDescription(x, start) {
+  const RowDescription = (x, start) => {
     received(sent[0], p.rowDescription(x, start, 0, column));
-  }
+  };
 
-  function NoData() {
+  const NoData = () => {
     received(sent[0], []);
-  }
+  };
 
-  function received(x, columns) {
+  const received = (x, columns) => {
     if (x.kind === "simple" && x.result.command !== null) {
       x.results.push(x.result);
       x.result = new Result();
@@ -1204,15 +1301,19 @@ export function Connection(ready, options, events) {
     x.result.columns = columns;
     if (x.learn) {
       x.learn = false;
-      x.entry &&
-        x.entry.owner === x &&
-        ((x.entry.columns = columns), learned(x.entry, x.statement));
+      if (x.entry && x.entry.owner === x) {
+        x.entry.columns = columns;
+        learned(x.entry, x.statement);
+      }
     }
-    x.describing && described(x);
-  }
+    if (x.describing) {
+      described(x);
+    }
+  };
 
-  function column(name, table, number, type) {
+  const column = (name, table, number, type) => {
     const parser = events.parser(type);
+    // oxlint-disable-next-line sort-keys -- users see a column's keys in this order, and transform.column.from runs before the decoder is made
     return {
       name: transform.column.from ? transform.column.from(name) : name,
       parser: parser.identity ? null : parser,
@@ -1221,76 +1322,91 @@ export function Connection(ready, options, events) {
       number,
       type,
     };
-  }
+  };
 
-  function DataRow(x, start) {
-    const item = sent[0],
-      { query, columns } = item,
-      raw = query.isRaw,
-      from = raw !== true ? transform.value.from : null,
-      shape =
-        item.shaped === columns
-          ? item.reader
-          : ((item.shaped = columns), (item.reader = Rows(columns))),
-      fast = raw !== true && read(shape, !!raw, text, from),
-      n = columns.length,
-      result = item.result;
+  const DataRow = (x, start) => {
+    const [item] = sent;
+    const { query, columns } = item;
+    const raw = query.isRaw;
+    const from = raw === true ? null : transform.value.from;
+    const shape =
+      item.shaped === columns
+        ? item.reader
+        : ((item.shaped = columns), (item.reader = Rows(columns)));
+    const fast = raw !== true && read(shape, !!raw, text, from);
+    const n = columns.length;
+    const { result } = item;
 
     let row;
     if (fast) {
       row = fast(x, start + 7);
     } else {
-      row = raw ? new Array(n) : {};
+      row = raw ? [] : {};
       let i = start + 7;
-      for (let j = 0; j < n; j++) {
+      for (let j = 0; j < n; j += 1) {
         const length =
-            (x[i] << 24) | (x[i + 1] << 16) | (x[i + 2] << 8) | x[i + 3],
-          column = columns[j];
+          (x[i] << 24) | (x[i + 1] << 16) | (x[i + 2] << 8) | x[i + 3];
+        const field = columns[j];
         i += 4;
         let value = null;
         if (length !== -1) {
-          value =
-            raw === true
-              ? Buffer.from(x.subarray(i, i + length))
-              : column.decode
-                ? column.decode(x, i, i + length)
-                : column.parser
-                  ? column.parser(text(x, i, i + length))
-                  : text(x, i, i + length);
+          if (raw === true) {
+            value = Buffer.from(x.subarray(i, i + length));
+          } else if (field.decode) {
+            value = field.decode(x, i, i + length);
+          } else if (field.parser) {
+            value = field.parser(text(x, i, i + length));
+          } else {
+            value = text(x, i, i + length);
+          }
           i += length;
         }
-        from && (value = from(value, column));
-        raw
-          ? (row[j] = value)
-          : column.name === "__proto__"
-            ? own(row, column.name, value)
-            : (row[column.name] = value);
+        if (from) {
+          value = from(value, field);
+        }
+        if (raw) {
+          row[j] = value;
+        } else if (field.name === "__proto__") {
+          own(row, field.name, value);
+        } else {
+          row[field.name] = value;
+        }
       }
     }
 
-    const out = transform.row.from ? transform.row.from(row) : row;
-    query.forEachFn
-      ? query.forEachFn(out, result)
-      : (result[result.length] = out);
-  }
+    const output = transform.row.from ? transform.row.from(row) : row;
+    if (query.forEachFn) {
+      query.forEachFn(output, result);
+    } else {
+      result[result.length] = output;
+    }
+  };
 
-  function CommandComplete(x, start, end) {
-    const item = sent[0],
-      { command, count } = p.commandComplete(x, start, end),
-      result = item.result;
+  const CommandComplete = (x, start, end) => {
+    const [item] = sent;
+    const { command, count } = p.commandComplete(x, start, end);
+    const { result } = item;
 
     result.command = command;
     result.count = count;
     result.state = connection.backend;
     result.statement = item;
-    item.query && (item.query.source = item);
+    if (item.query) {
+      item.query.source = item;
+    }
     result.columns ||= item.columns;
 
-    item.final &&
-      (item.stream && Object.assign(item.stream, { count, command }),
-      item.final(),
-      (item.final = null));
-    item.kind !== "simple" && (item.completed = true);
+    if (item.final) {
+      if (item.stream) {
+        // oxlint-disable-next-line sort-keys -- the order the stream's own properties are listed in
+        Object.assign(item.stream, { count, command });
+      }
+      item.final();
+      item.final = null;
+    }
+    if (item.kind !== "simple") {
+      item.completed = true;
+    }
 
     if (item.kind === "simple") {
       item.results.push(item.result);
@@ -1300,44 +1416,50 @@ export function Connection(ready, options, events) {
 
     if (item.rows) {
       item.finished = true;
-      item.flushing && sync(item);
-      result.count &&
-        (item.last = new Promise((r) => r(item.query.cursorFn(result)))).catch(
-          noop
-        );
+      if (item.flushing) {
+        sync(item);
+      }
+      if (result.count) {
+        item.last = attempt(() => item.query.cursorFn(result));
+        item.last.catch(noop);
+      }
     }
 
-    item.nosync && !item.error && part(item);
-  }
+    if (item.nosync && !item.error) {
+      part(item);
+    }
+  };
 
-  function unsafe(item) {
-    const error = () =>
-      Errors.generic(
-        "UNSAFE_TRANSACTION",
-        "Only use sql.begin, sql.reserved or max: 1"
-      );
+  const unsafe = (item) => {
     rolling = true;
-    item.own = error();
-    sent.forEach((x) => x.kind !== "local" && (x.own = error()));
+    item.own = unsafeTransaction();
+    for (const x of sent) {
+      if (x.kind !== "local") {
+        x.own = unsafeTransaction();
+      }
+    }
     pending.unshift(
-      Exchange(
-        "internal",
-        null,
-        null,
-        (x) => (p.query(out, "rollback"), (x.synced = true))
-      )
+      Exchange("internal", null, null, (x) => {
+        p.query(out, "rollback");
+        x.synced = true;
+        return true;
+      })
     );
-  }
+  };
 
-  function EmptyQueryResponse() {
-    const item = sent[0];
-    item.kind === "simple" &&
-      (item.results.push(item.result), (item.result = new Result()));
-    item.nosync && !item.error && part(item);
-  }
+  const EmptyQueryResponse = () => {
+    const [item] = sent;
+    if (item.kind === "simple") {
+      item.results.push(item.result);
+      item.result = new Result();
+    }
+    if (item.nosync && !item.error) {
+      part(item);
+    }
+  };
 
-  async function PortalSuspended() {
-    const item = sent[0];
+  const PortalSuspended = async () => {
+    const [item] = sent;
     if (!item.flushing) {
       return (item.suspended = true);
     }
@@ -1353,9 +1475,14 @@ export function Connection(ready, options, events) {
       if (item.query.aborted) {
         throw item.query.aborted;
       }
-      next === CLOSE
-        ? (p.close(out, "P", ""), sync(item))
-        : (p.execute(out, "", item.rows), p.flush(out), schedule());
+      if (next === CLOSE) {
+        p.close(out, "P", "");
+        sync(item);
+      } else {
+        p.execute(out, "", item.rows);
+        p.flush(out);
+        schedule();
+      }
     } catch (error) {
       item.awaiting = false;
       if (closed || item.synced || sent[0] !== item) {
@@ -1365,55 +1492,77 @@ export function Connection(ready, options, events) {
     }
 
     refresh();
-  }
+  };
 
-  function ErrorResponse(x, start, end) {
-    const item = sent[0],
-      error = Errors.postgres(p.error(x, start, end));
+  const ErrorResponse = (x, start, end) => {
+    const [item] = sent;
+    const error = Errors.postgres(p.error(x, start, end));
 
     if (!item) {
       return (connection.fatal = error);
     }
 
-    item.stream && item.stream.destroy(error);
-    item.final && (item.final(error), (item.final = null));
+    if (item.stream) {
+      item.stream.destroy(error);
+    }
+    if (item.final) {
+      item.final(error);
+      item.final = null;
+    }
     fail(item, error);
-  }
+  };
 
-  function ReadyForQuery(x, start) {
+  const ReadyForQuery = (x, start) => {
     status = p.readyForQuery(x, start);
     frames.own(false);
     const item = sent.shift();
-    options.scheduler && timed(item);
+    if (options.scheduler) {
+      timed(item);
+    }
     item.done = true;
     item.open = false;
-    item.trace && traced--;
-    item.kind === "internal" && (rolling = false);
-    status !== "I" &&
+    if (item.trace) {
+      traced -= 1;
+    }
+    if (item.kind === "internal") {
+      rolling = false;
+    }
+    if (
+      status !== "I" &&
       !rolling &&
       !item.lease &&
       !connection.lease &&
-      options.max !== 1 &&
+      options.max !== 1
+    ) {
       unsafe(item);
-    blocker === item && (blocker = null);
+    }
+    if (blocker === item) {
+      blocker = null;
+    }
     settle(item);
-    item.entry && item.entry.owner === item && (item.entry.owner = null);
+    if (item.entry && item.entry.owner === item) {
+      item.entry.owner = null;
+    }
     while (sent.length && sent[0].kind === "local") {
       settle(sent.shift());
     }
     release();
 
-    const next = sent[0];
+    const [next] = sent;
     if (next && next.query) {
       next.query.active = true;
-      next.cancel && turn(next);
+      if (next.cancel) {
+        turn(next);
+      }
     }
 
-    closing && idle() && terminate();
+    if (closing && idle()) {
+      terminate();
+    }
     events.onready(connection);
-  }
+  };
 
-  function settle(x) {
+  const settle = (x) => {
     answered(x);
     if (x.kind === "internal") {
       return;
@@ -1422,12 +1571,14 @@ export function Connection(ready, options, events) {
     if (x.kind === "describe") {
       return x.error
         ? x.reject(x.error)
-        : x.resolve({ params: x.params || [], columns: x.columns });
+        : x.resolve({ columns: x.columns, params: x.params || [] });
     }
 
-    const { query } = x,
-      cursor = x.origin || (x.portal ? x : null);
-    cursor && (x.own || x.error || !x.suspended) && unfence(cursor);
+    const { query } = x;
+    const cursor = x.origin || (x.portal ? x : null);
+    if (cursor && (x.own || x.error || !x.suspended)) {
+      unfence(cursor);
+    }
 
     if (x.own) {
       return query.reject(decorate(query, x.own));
@@ -1441,23 +1592,28 @@ export function Connection(ready, options, events) {
       return suspended(x);
     }
 
-    x.last
-      ? x.last.then(
-          () => query.settled || finish(x),
-          (error) => query.settled || query.reject(decorate(query, error))
-        )
-      : query.settled || finish(x);
-  }
+    if (x.last) {
+      // oxlint-disable-next-line promise/prefer-catch -- a throw in the first handler must not reach the second, which reports a failed cursor callback
+      return x.last.then(
+        () => query.settled || finish(x),
+        (cursorError) =>
+          query.settled || query.reject(decorate(query, cursorError))
+      );
+    }
+    if (!query.settled) {
+      finish(x);
+    }
+  };
 
-  function unfence(cursor) {
+  const unfence = (cursor) => {
     if (!open.delete(cursor) || open.size || !fence) {
       return;
     }
     fence = null;
     release();
-  }
+  };
 
-  function failed(x) {
+  const failed = (x) => {
     const entry = x.kind === "query" ? x.entry : null;
     const parsing =
       x.fresh || (entry && entry.owner === x && entry.state === "parsing");
@@ -1468,7 +1624,9 @@ export function Connection(ready, options, events) {
       x.statement.name &&
       parsing
     ) {
-      entry && drop(entry);
+      if (entry) {
+        drop(entry);
+      }
       x.statement.name += "_";
       return retryable(x) ? again(x, null) : settleError(x, x.error);
     }
@@ -1496,28 +1654,27 @@ export function Connection(ready, options, events) {
 
     stale(entry);
     settleError(x, x.error);
-  }
+  };
 
-  function stale(entry) {
-    prepared.get(entry.name) === entry && (entry.state = "stale");
-  }
+  const stale = (entry) => {
+    if (prepared.get(entry.name) === entry) {
+      entry.state = "stale";
+    }
+  };
 
-  function retryable(x) {
-    return (
-      !x.retried &&
-      !x.batch &&
-      !x.cancel &&
-      !x.query.cancelled &&
-      !x.query.cursorFn &&
-      !x.streaming &&
-      x.lease === connection.lease &&
-      status === "I" &&
-      !closing &&
-      (sent.length === 0 || (!x.lease && options.max !== 1))
-    );
-  }
+  const retryable = (x) =>
+    !x.retried &&
+    !x.batch &&
+    !x.cancel &&
+    !x.query.cancelled &&
+    !x.query.cursorFn &&
+    !x.streaming &&
+    x.lease === connection.lease &&
+    status === "I" &&
+    !closing &&
+    (sent.length === 0 || (!x.lease && options.max !== 1));
 
-  function again(x, original) {
+  const again = (x, original) => {
     const retry = Exchange("query", x.query, x.lease, extended);
     retry.statement = x.statement;
     retry.ends = x.ends;
@@ -1533,15 +1690,16 @@ export function Connection(ready, options, events) {
 
     pending.unshift(retry);
     release();
-  }
+  };
 
-  function suspended(x) {
-    const cursor = x.origin || x,
-      { query } = x;
+  const suspended = (x) => {
+    const cursor = x.origin || x;
+    const { query } = x;
 
     running.add(query);
 
-    new Promise((r) => r(query.cursorFn(x.result))).then(
+    // oxlint-disable-next-line promise/prefer-catch -- a throw in the first handler must not reach the second, which reports a failed cursor callback
+    return attempt(() => query.cursorFn(x.result)).then(
       (next) => {
         running.delete(query);
         if (query.settled) {
@@ -1550,18 +1708,19 @@ export function Connection(ready, options, events) {
         queue(
           step(cursor, next === CLOSE || !!query.aborted, query.aborted || null)
         );
+        return null;
       },
-      (error) => {
+      (cursorError) => {
         running.delete(query);
         if (query.settled) {
           return unfence(cursor);
         }
-        queue(step(cursor, true, error));
+        queue(step(cursor, true, cursorError));
       }
     );
-  }
+  };
 
-  function step(cursor, end, failure) {
+  const step = (cursor, end, failure) => {
     const x = Exchange("step", cursor.query, cursor.lease, stepped);
     x.origin = cursor;
     x.statement = cursor.statement;
@@ -1572,9 +1731,9 @@ export function Connection(ready, options, events) {
     x.end = end;
     x.failure = failure;
     return x;
-  }
+  };
 
-  function stepped(x) {
+  const stepped = (x) => {
     const cursor = x.origin;
 
     if (connection.lease !== cursor.lease || cursor.epoch !== epoch) {
@@ -1588,47 +1747,25 @@ export function Connection(ready, options, events) {
     }
 
     x.own = x.failure;
-    x.end ? p.close(out, "P", x.portal) : p.execute(out, x.portal, x.rows);
+    if (x.end) {
+      p.close(out, "P", x.portal);
+    } else {
+      p.execute(out, x.portal, x.rows);
+    }
     sync(x);
-  }
+  };
 
-  function outlived() {
-    return Errors.generic(
-      "UNSAFE_TRANSACTION",
-      "The cursor outlived its transaction"
-    );
-  }
-
-  function finish(x) {
-    const { query } = x;
-
-    if (x.kind === "simple") {
-      x.result.command !== null && x.results.push(x.result);
-      const results = x.results;
-      return query.resolve(
-        results.length > 1 ? results : results[0] || x.result
-      );
-    }
-
-    query.resolve(x.result);
-  }
-
-  function NotificationResponse(x, start) {
+  const NotificationResponse = (x, start) => {
     const { pid, channel, payload } = p.notification(x, start);
-    events.onnotify && guard(events.onnotify, channel, payload, pid);
-  }
-
-  function guard(fn, ...xs) {
-    try {
-      fn(...xs);
-    } catch (error) {
-      noop(error);
+    if (events.onnotify) {
+      guard(events.onnotify, channel, payload, pid);
     }
-  }
+  };
 
-  function NoticeResponse(x, start, end) {
+  const NoticeResponse = (x, start, end) => {
     const notice = p.error(x, start, end);
-    listened(channels.notice) &&
+    if (listened(channels.notice)) {
+      // oxlint-disable-next-line sort-keys -- subscribers see the message's keys in this order
       channels.notice.publish({
         notice,
         connection: connection.id,
@@ -1636,89 +1773,96 @@ export function Connection(ready, options, events) {
         port: connection.port,
         database: options.database,
       });
-    options.onnotice
-      ? guard(options.onnotice, notice)
-      : options.onnotice === false || console.log(notice); // eslint-disable-line
-  }
+    }
+    if (options.onnotice) {
+      guard(options.onnotice, notice);
+    } else if (options.onnotice !== false) {
+      console.log(notice);
+    }
+  };
 
-  function ParameterStatus(x, start) {
+  const ParameterStatus = (x, start) => {
     const [k, v] = p.parameterStatus(x, start);
     connection.parameters[k] = v;
-    events.onparameter && guard(events.onparameter, k, v);
-  }
+    if (events.onparameter) {
+      guard(events.onparameter, k, v);
+    }
+  };
 
-  function writeData(chunk, callback) {
+  const writeData = (chunk, done) => {
     p.copyData(out, chunk);
-    flush() ? callback() : (drained = callback);
-  }
+    if (flush()) {
+      done();
+    } else {
+      drained = done;
+    }
+  };
 
-  function writable(item) {
-    return {
-      autoDestroy: true,
-      write(chunk, encoding, callback) {
-        writeData(chunk, callback);
-      },
-      destroy(error, callback) {
-        callback(error);
-        item.stream = null;
-        if (!item.copied && !closed && !item.error) {
-          p.copyFail(out, `${error || "The COPY stream was destroyed"}`);
-          item.copied = true;
-          item.open = false;
-          schedule(true);
-          refresh();
-        }
-      },
-      final(callback) {
-        p.copyDone(out);
+  const writable = (item) => ({
+    autoDestroy: true,
+    destroy(error, done) {
+      done(error);
+      item.stream = null;
+      if (!item.copied && !closed && !item.error) {
+        p.copyFail(out, `${error || "The COPY stream was destroyed"}`);
         item.copied = true;
         item.open = false;
-        item.final = callback;
         schedule(true);
         refresh();
-      },
-    };
-  }
+      }
+    },
+    final(done) {
+      p.copyDone(out);
+      item.copied = true;
+      item.open = false;
+      item.final = done;
+      schedule(true);
+      refresh();
+    },
+    write(chunk, encoding, done) {
+      writeData(chunk, done);
+    },
+  });
 
-  function CopyInResponse() {
-    const item = sent[0];
+  const CopyInResponse = () => {
+    const [item] = sent;
     item.stream = new Stream.Writable(writable(item));
     item.query.resolve(item.stream);
-  }
+  };
 
-  function readable(item) {
-    return () => {
-      item.wanted = true;
+  const readable = (item) => () => {
+    item.wanted = true;
 
-      if (!frames.paused) {
-        return;
-      }
+    if (!frames.paused) {
+      return;
+    }
 
-      frames.resume();
-      frames.paused || socket.resume();
-    };
-  }
+    frames.resume();
+    if (!frames.paused) {
+      socket.resume();
+    }
+  };
 
-  function CopyOutResponse() {
-    const item = sent[0];
+  const CopyOutResponse = () => {
+    const [item] = sent;
     item.stream = new Stream.Readable({ read: readable(item) });
     item.open = false;
     frames.own(true);
     item.query.resolve(item.stream);
-  }
+  };
 
-  function CopyBothResponse() {
-    const item = sent[0];
+  const CopyBothResponse = () => {
+    const [item] = sent;
     item.stream = new Stream.Duplex({
       ...writable(item),
       read: readable(item),
     });
     frames.own(true);
     item.query.resolve(item.stream);
-  }
+  };
 
-  function CopyData(x, start, end) {
-    const item = sent[0];
+  const CopyData = (x, start, end) => {
+    const [item] = sent;
 
     if (!item.stream) {
       return;
@@ -1736,179 +1880,394 @@ export function Connection(ready, options, events) {
       frames.pause();
       socket.pause();
     }
-  }
+  };
 
-  function CopyDone() {
+  const CopyDone = () => {
     frames.own(false);
-    const item = sent[0];
-    item.stream && item.stream.push(null);
+    const [item] = sent;
+    if (item.stream) {
+      item.stream.push(null);
+    }
     item.stream = null;
+  };
+
+  const frames = p.Frames(frame, socket.shared, (failure) => {
+    connection.fatal = failure;
+    return socket.destroy();
+  });
+
+  const id = ids;
+  ids += 1;
+  const connection = {
+    backend: ready.backend,
+    backlog,
+    batch,
+    cancel,
+    close,
+    get closed() {
+      return closed;
+    },
+    get closing() {
+      return !!closing;
+    },
+    get copying() {
+      return !!blocker && blocker.streaming && blocker.open;
+    },
+    describe,
+    destroy,
+    get exclusive() {
+      return !!blocker && exclusive(blocker);
+    },
+    go,
+    heavy,
+    host: ready.host,
+    id,
+    get inflight() {
+      return sent.length + pending.length;
+    },
+    lease: null,
+    local,
+    get notable() {
+      return notables > 0;
+    },
+    parameters: ready.parameters,
+    port: ready.port,
+    prepared,
+    ref: () => socket.ref(),
+    send,
+    simple,
+    get status() {
+      return status;
+    },
+    unref: () => socket.unref(),
+  };
+
+  socket.ondata = (x) => {
+    heard = timers.now();
+    return frames.push(x);
+  };
+  socket.ondrain = ondrain;
+  // oxlint-disable-next-line unicorn/prefer-add-event-listener -- the socket is our own wrapper, which takes a single handler as a property
+  socket.onclose = onclose;
+  if (ready.rest && ready.rest.length) {
+    frames.push(ready.rest);
   }
-}
+  socket.resume();
 
-function oidOf(name, table, number, type) {
-  return type;
-}
+  return connection;
+};
 
-function copy(error) {
+const holds = (x) =>
+  x.describing ||
+  (x.gate && x.learn && !x.error) ||
+  (!!x.error && !x.done) ||
+  (x.flushing && !x.synced) ||
+  (x.streaming && x.open) ||
+  (x.alone && !x.done);
+
+const exclusive = (x) => x.flushing || x.streaming || x.alone;
+
+// A statement being parsed for another query, whose parameter types are not known yet.
+const unsettled = (entry) =>
+  entry &&
+  entry.state === "parsing" &&
+  entry.oids === null &&
+  entry.owner &&
+  !entry.owner.error;
+
+const usable = (entry, statement) =>
+  entry.oids !== null &&
+  (entry.state === "parsing" ||
+    (entry.state === "ready" && entry.version === statement.version));
+
+const learned = (entry, statement) => {
+  const shape = `${entry.oids.join(",")}:${entry.columns.map((x) => x.type).join(",")}`;
+  if (statement.shape !== shape) {
+    if (statement.shape !== undefined) {
+      statement.version += 1;
+    }
+    statement.shape = shape;
+  }
+  entry.version = statement.version;
+};
+
+const inferred = (built) => {
+  for (const oid of built.oids) {
+    if (!oid) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const same = (entry, params, columns) => {
+  const a = entry.oids || [];
+  const b = entry.columns;
+
+  return (
+    !!b &&
+    a.length === params.length &&
+    params.every((x, i) => x === a[i]) &&
+    b.length === columns.length &&
+    columns.every((x, i) => x.type === b[i].type)
+  );
+};
+
+const batched = (b, i, error, result) => {
+  if (b.settled[i]) {
+    return;
+  }
+
+  b.settled[i] = true;
+  b.left -= 1;
+  if (error) {
+    if (b.error === null || (i < b.index && !error.skipped)) {
+      b.error = error;
+      b.index = i;
+    }
+  } else {
+    b.results[i] = result;
+  }
+
+  if (b.left) {
+    return;
+  }
+
+  const { query, parts, results } = b;
+  if (b.error) {
+    b.error.index = b.index;
+    for (const [j, member] of parts.entries()) {
+      Query.prototype.reject.call(
+        member,
+        j === b.index ? b.error : skipped(b.error, b.index)
+      );
+      member.catch(noop);
+    }
+    return query.reject(b.error);
+  }
+
+  for (const [j, member] of parts.entries()) {
+    Query.prototype.resolve.call(member, results[j]);
+  }
+  query.resolve(results);
+};
+
+const skipped = (error, index) => {
+  const x = copy(error);
+  x.index = index;
+  x.skipped = true;
+  return x;
+};
+
+const unsafeTransaction = () =>
+  Errors.generic(
+    "UNSAFE_TRANSACTION",
+    "Only use sql.begin, sql.reserved or max: 1"
+  );
+
+const outlived = () =>
+  Errors.generic("UNSAFE_TRANSACTION", "The cursor outlived its transaction");
+
+const finish = (x) => {
+  const { query } = x;
+
+  if (x.kind === "simple") {
+    if (x.result.command !== null) {
+      x.results.push(x.result);
+    }
+    const { results } = x;
+    return query.resolve(results.length > 1 ? results : results[0] || x.result);
+  }
+
+  query.resolve(x.result);
+};
+
+const guard = (fn, ...xs) => {
+  try {
+    fn(...xs);
+  } catch (error) {
+    noop(error);
+  }
+};
+
+// What new Promise((resolve) => resolve(fn())) gives: fn runs now, and its throw rejects.
+const attempt = (fn) => {
+  const { promise, resolve, reject } = Promise.withResolvers();
+  try {
+    resolve(fn());
+  } catch (error) {
+    reject(error);
+  }
+  return promise;
+};
+
+const oidOf = (name, table, number, type) => type;
+
+const copy = (error) => {
   const x = Object.create(
     Object.getPrototypeOf(error),
     Object.getOwnPropertyDescriptors(error)
   );
   Object.defineProperty(x, "stack", {
+    configurable: true,
     value: error.stack,
     writable: true,
-    configurable: true,
   });
-  ["query", "parameters", "args", "types"].forEach((k) => delete x[k]);
+  delete x.query;
+  delete x.parameters;
+  delete x.args;
+  delete x.types;
   return x;
-}
+};
 
-function key(name) {
+const key = (name) => {
   const x = JSON.stringify(String(name));
   return name === "__proto__" ? `[${x}]` : x;
-}
+};
 
-export function own(row, name, value) {
+export const own = (row, name, value) => {
   Object.defineProperty(row, name, {
+    configurable: true,
+    enumerable: true,
     value,
     writable: true,
-    enumerable: true,
-    configurable: true,
   });
-}
+};
 
-function Exchange(kind, query, lease, write) {
-  return {
-    kind,
-    query,
-    lease,
-    write,
-    trace: (query && query.trace) || null,
-    statement: null,
-    text: "",
-    entry: null,
-    fresh: null,
-    previous: null,
-    parses: [],
-    values: null,
-    params: null,
-    columns: null,
-    shaped: null,
-    reader: null,
-    result: new Result(),
-    results: null,
-    origin: null,
-    portal: "",
-    rows: 0,
-    end: false,
-    failure: null,
-    flushing: false,
-    streaming: false,
-    open: false,
-    alone: !!(query && query.alone),
-    describing: false,
-    learn: false,
-    batch: null,
-    nosync: false,
-    aborted: false,
-    flushed: false,
-    loose: false,
-    gate: false,
-    later: false,
-    formats: null,
-    verify: false,
-    synced: false,
-    bound: false,
-    suspended: false,
-    finished: false,
-    done: false,
-    ends: false,
-    epoch: 0,
-    retried: false,
-    original: null,
-    error: null,
-    own: null,
-    cancel: null,
-    unanswered: null,
-    silence: null,
-    completed: false,
-    for: null,
-    stream: null,
-    copied: false,
-    wanted: false,
-    final: null,
-    resolve: null,
-    reject: null,
-    cost: undefined,
-  };
-}
+const Exchange = (kind, query, lease, write) => ({
+  aborted: false,
+  alone: !!(query && query.alone),
+  batch: null,
+  bound: false,
+  cancel: null,
+  columns: null,
+  completed: false,
+  copied: false,
+  cost: undefined,
+  describing: false,
+  done: false,
+  end: false,
+  ends: false,
+  entry: null,
+  epoch: 0,
+  error: null,
+  failure: null,
+  final: null,
+  finished: false,
+  flushed: false,
+  flushing: false,
+  for: null,
+  formats: null,
+  fresh: null,
+  gate: false,
+  kind,
+  later: false,
+  learn: false,
+  lease,
+  loose: false,
+  nosync: false,
+  open: false,
+  origin: null,
+  original: null,
+  own: null,
+  params: null,
+  parses: [],
+  portal: "",
+  previous: null,
+  query,
+  reader: null,
+  reject: null,
+  resolve: null,
+  result: new Result(),
+  results: null,
+  retried: false,
+  rows: 0,
+  shaped: null,
+  silence: null,
+  statement: null,
+  stream: null,
+  streaming: false,
+  suspended: false,
+  synced: false,
+  text: "",
+  trace: (query && query.trace) || null,
+  unanswered: null,
+  values: null,
+  verify: false,
+  wanted: false,
+  write,
+});
 
-function Entry(name, owner, oids) {
-  return {
-    name,
-    owner,
-    oids,
-    columns: null,
-    serializers: null,
-    binary: null,
-    binaryOf: null,
-    state: "parsing",
-    version: -1,
-  };
-}
+const Entry = (name, owner, oids) => ({
+  binary: null,
+  binaryOf: null,
+  columns: null,
+  name,
+  oids,
+  owner,
+  serializers: null,
+  state: "parsing",
+  version: -1,
+});
 
-function Rows(columns) {
+const Rows = (columns) => {
   let state = states.get(columns);
   if (state === undefined) {
     state = {
-      columns,
-      seen: 0,
-      object: null,
       array: null,
+      columns,
       compilable:
         compiles &&
         columns.length <= 512 &&
         !columns.some((x) => String(x.name) === "__proto__"),
+      object: null,
+      seen: 0,
     };
     states.set(columns, state);
   }
   return state;
-}
+};
 
-function read(state, array, text, from) {
-  const key = array ? "array" : "object";
+const read = (state, array, toText, from) => {
+  const slot = array ? "array" : "object";
 
-  if (state[key] !== null) {
-    return state[key];
+  if (state[slot] !== null) {
+    return state[slot];
   }
 
-  if (!state.compilable || ++state.seen < after) {
+  if (!state.compilable) {
+    return null;
+  }
+  state.seen += 1;
+  if (state.seen < after) {
     return null;
   }
 
   try {
-    return (state[key] = compile(state.columns, array, text, from));
+    return (state[slot] = compile(state.columns, array, toText, from));
   } catch {
-    compiles = state.compilable = false;
+    state.compilable = false;
+    compiles = false;
     return null;
   }
-}
+};
 
-function compile(columns, array, text, from) {
-  const locals = [],
-    body = ["let l = 0"],
-    at = "x, i, i + l";
+const compile = (columns, array, toText, from) => {
+  const locals = [];
+  const body = ["let l = 0"];
+  const at = "x, i, i + l";
 
-  columns.forEach((c, j) => {
-    c.decode
-      ? locals.push(`d${j} = c[${j}].decode`)
-      : c.parser && locals.push(`p${j} = c[${j}].parser`);
-    const value = c.decode
-      ? `d${j}(${at})`
-      : c.parser
-        ? `p${j}(text(${at}))`
-        : `text(${at})`;
+  for (const [j, c] of columns.entries()) {
+    let value;
+    if (c.decode) {
+      locals.push(`d${j} = c[${j}].decode`);
+      value = `d${j}(${at})`;
+    } else if (c.parser) {
+      locals.push(`p${j} = c[${j}].parser`);
+      value = `p${j}(text(${at}))`;
+    } else {
+      value = `text(${at})`;
+    }
     body.push(
       "l = (x[i] << 24) | (x[i + 1] << 16) | (x[i + 2] << 8) | x[i + 3]",
       "i += 4",
@@ -1916,7 +2275,7 @@ function compile(columns, array, text, from) {
       `l !== -1 && (v${j} = ${value}, i += l)`,
       from ? `v${j} = from(v${j}, c[${j}])` : ""
     );
-  });
+  }
 
   body.push(
     array
@@ -1924,12 +2283,13 @@ function compile(columns, array, text, from) {
       : `return {${columns.map((c, j) => `${key(c.name)}:v${j}`).join(",")}}`
   );
 
+  // oxlint-disable-next-line no-new-func -- the row decoder, generated once per row shape because reading rows through it is much faster
   return new Function(
     "c",
     "text",
-    "from", // eslint-disable-line
+    "from",
     `${
       locals.length ? `const ${locals.join(", ")}\n` : ""
     }return function row(x, i) {\n${body.filter(Boolean).join("\n")}\n}`
-  )(columns, text, from);
-}
+  )(columns, toText, from);
+};

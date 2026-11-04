@@ -1,4 +1,4 @@
-import util from "node:util";
+import { inspect } from "node:util";
 
 import { build, isQuery, Join, joinStrings } from "./build.js";
 import {
@@ -12,14 +12,17 @@ import {
 import { ours, Errors, queryError } from "./errors.js";
 import { statement } from "./result.js";
 
-const origins = new WeakMap(),
-  noop = () => {};
+const origins = new WeakMap();
+const noop = () => {
+  // A cancel that fails is not the query's failure: it is ignored.
+};
 
 export const CLOSE = {};
 
 export class Query extends Promise {
   constructor(strings, args, handler, options = {}) {
-    let resolve, reject;
+    let resolve;
+    let reject;
 
     super((a, b) => {
       resolve = a;
@@ -47,11 +50,11 @@ export class Query extends Promise {
     this.timer = null;
     this.timedOut = false;
 
+    // oxlint-disable-next-line unicorn/error-message -- only its stack is kept, and shown as it is
     this.originError = handler.debug ? new Error() : null;
-    this.tagged &&
-      !handler.debug &&
-      !origins.has(strings) &&
+    if (this.tagged && !handler.debug && !origins.has(strings)) {
       origins.set(strings, located());
+    }
   }
 
   static get [Symbol.species]() {
@@ -60,30 +63,45 @@ export class Query extends Promise {
 
   join(items) {
     const kept = [...items].filter(
-        (x) => x !== false && x !== null && x !== undefined
-      ),
-      joined = new Query(joinStrings, [new Join(this, kept)], this.handler);
+      (x) => x !== false && x !== null && x !== undefined
+    );
+    const joined = new Query(joinStrings, [new Join(this, kept)], this.handler);
 
     Object.defineProperty(joined, "length", { value: kept.length });
     return joined;
   }
 
   resolve(x) {
-    this.timer && untime(this);
-    this.aborts && this.aborts();
+    if (this.timer) {
+      untime(this);
+    }
+    if (this.aborts) {
+      this.aborts();
+    }
     this.active = false;
     this.settled = true;
-    this.trace && traced(this, null, x);
+    if (this.trace) {
+      traced(this, null, x);
+    }
     this.fulfil(x);
   }
 
-  reject(x) {
-    this.timer && untime(this);
-    this.timedOut && x && timedOut(x) && (x = late(this, x));
-    this.aborts && this.aborts();
+  reject(reason) {
+    let x = reason;
+    if (this.timer) {
+      untime(this);
+    }
+    if (this.timedOut && x && timedOut(x)) {
+      x = late(this, x);
+    }
+    if (this.aborts) {
+      this.aborts();
+    }
     this.active = false;
     this.settled = true;
-    this.trace && traced(this, x);
+    if (this.trace) {
+      traced(this, x);
+    }
     this.fail(x);
   }
 
@@ -109,7 +127,7 @@ export class Query extends Promise {
     return this.build().values;
   }
 
-  [util.inspect.custom](depth, options, inspect) {
+  [inspect.custom](depth, options, nested) {
     if (!this.handler.debug) {
       return "Query {}";
     }
@@ -120,7 +138,8 @@ export class Query extends Promise {
     } catch (error) {
       return `Query { ${error.message} }`;
     }
-    return `Query ${inspect({ text: x.text, parameters: x.values }, options)}`;
+    // oxlint-disable-next-line sort-keys -- the order in which inspect prints them
+    return `Query ${nested({ text: x.text, parameters: x.values }, options)}`;
   }
 
   cancel() {
@@ -138,10 +157,10 @@ export class Query extends Promise {
 
     const abort = () => this.cancel().catch(noop);
     signal.addEventListener("abort", abort, { once: true });
-    this.aborts = () => (
-      (this.aborts = null),
-      signal.removeEventListener("abort", abort)
-    );
+    this.aborts = () => {
+      this.aborts = null;
+      signal.removeEventListener("abort", abort);
+    };
     return this;
   }
 
@@ -151,29 +170,29 @@ export class Query extends Promise {
     return this;
   }
 
+  // oxlint-disable-next-line require-await -- the API returns a promise, which adopts the query
   async readable() {
     this.simple();
     this.streaming = true;
     return this;
   }
 
+  // oxlint-disable-next-line require-await -- the API returns a promise, which adopts the query
   async writable() {
     this.simple();
     this.streaming = true;
     return this;
   }
 
+  // oxlint-disable-next-line default-param-last -- cursor(fn) and cursor(rows, fn) are both the API, and cursor.length stays 0
   cursor(rows = 1, fn) {
     this.options.simple = false;
-    if (typeof rows === "function") {
-      fn = rows;
-      rows = 1;
-    }
+    const callback = typeof rows === "function" ? rows : fn;
+    this.cursorRows = typeof rows === "function" ? 1 : rows;
 
-    this.cursorRows = rows;
-
-    if (typeof fn === "function") {
-      return ((this.cursorFn = fn), this);
+    if (typeof callback === "function") {
+      this.cursorFn = callback;
+      return this;
     }
 
     let prev;
@@ -184,30 +203,39 @@ export class Query extends Promise {
             return { done: true };
           }
 
-          prev && prev();
-          const promise = new Promise((resolve, reject) => {
-            this.cursorFn = (value) => {
-              resolve({ value, done: false });
-              return new Promise((r) => (prev = r));
-            };
-            this.resolve = (x) => (
-              (this.active = false),
-              (this.settled = true),
-              this.trace && traced(this, null, x),
-              resolve({ done: true })
-            );
-            this.reject = (x) => (
-              (this.active = false),
-              (this.settled = true),
-              this.trace && traced(this, x),
-              reject(x)
-            );
-          });
+          if (prev) {
+            prev();
+          }
+          const { promise, resolve, reject } = Promise.withResolvers();
+          this.cursorFn = (value) => {
+            resolve({ done: false, value });
+            const consumed = Promise.withResolvers();
+            prev = consumed.resolve;
+            return consumed.promise;
+          };
+          this.resolve = (x) => {
+            this.active = false;
+            this.settled = true;
+            if (this.trace) {
+              traced(this, null, x);
+            }
+            resolve({ done: true });
+          };
+          this.reject = (x) => {
+            this.active = false;
+            this.settled = true;
+            if (this.trace) {
+              traced(this, x);
+            }
+            reject(x);
+          };
           this.execute();
           return promise;
         },
         return() {
-          prev && prev(CLOSE);
+          if (prev) {
+            prev(CLOSE);
+          }
           return { done: true };
         },
       }),
@@ -216,10 +244,12 @@ export class Query extends Promise {
 
   describe() {
     this.options.simple = false;
-    this.onlyDescribe = this.options.prepare = true;
+    this.options.prepare = true;
+    this.onlyDescribe = true;
     return this;
   }
 
+  // oxlint-disable-next-line class-methods-use-this -- a method of the query API, kept to point to its new name
   stream() {
     throw new Error(".stream has been renamed to .forEach");
   }
@@ -250,11 +280,12 @@ export class Query extends Promise {
   }
 
   run() {
-    active(channels.query)
-      ? start(channels.query, (this.trace = context(this)), () =>
-          this.handler(this)
-        )
-      : this.handler(this);
+    if (active(channels.query)) {
+      this.trace = context(this);
+      start(channels.query, this.trace, () => this.handler(this));
+    } else {
+      this.handler(this);
+    }
   }
 
   execute() {
@@ -262,6 +293,7 @@ export class Query extends Promise {
     return this;
   }
 
+  // oxlint-disable-next-line unicorn/no-thenable -- a query is a promise that runs when awaited
   then(fulfilled, rejected) {
     this.handle();
     return super.then(fulfilled, rejected);
@@ -278,21 +310,18 @@ export class Query extends Promise {
   }
 }
 
-function untime(q) {
+const untime = (q) => {
   q.handler.options.timers.clearTimeout(q.timer);
   q.timer = null;
-}
+};
 
-function timedOut(x) {
-  return (
-    x.code === "57014" ||
-    (x.code === "CONNECTION_DESTROYED" &&
-      !!x.cause &&
-      x.cause.code === "CANCEL_UNANSWERED")
-  );
-}
+const timedOut = (x) =>
+  x.code === "57014" ||
+  (x.code === "CONNECTION_DESTROYED" &&
+    !!x.cause &&
+    x.cause.code === "CANCEL_UNANSWERED");
 
-function late(q, error) {
+const late = (q, error) => {
   const x = Errors.generic(
     "QUERY_TIMEOUT",
     `The query did not finish within query_timeout (${
@@ -301,18 +330,19 @@ function late(q, error) {
   );
   x.cause = error.code === "CONNECTION_DESTROYED" ? error.cause : error;
   return queryError(x, q, q.handler.debug);
-}
+};
 
-function context(q) {
+const context = (q) => {
   const options = q.handler.options || {};
   let text = null;
   if (q.strings.length) {
     try {
-      text = q.text;
+      ({ text } = q);
     } catch {
       text = null;
     }
   }
+  // oxlint-disable-next-line sort-keys -- subscribers to diagnostics_channel see the fields in this order
   return {
     query: text,
     parameters: undefined,
@@ -329,9 +359,9 @@ function context(q) {
     firstByte: null,
     complete: null,
   };
-}
+};
 
-function traced(q, error, result) {
+const traced = (q, error, result) => {
   const x = q.trace;
   q.trace = null;
   x.complete = now();
@@ -340,23 +370,24 @@ function traced(q, error, result) {
     x.count = result.count;
   }
   finish(channels.query, x, error, result);
-}
+};
 
-function located() {
+const located = () => {
   const limit = Error.stackTraceLimit;
   Error.stackTraceLimit = 8;
   try {
+    // oxlint-disable-next-line unicorn/error-message -- only the stack is kept, and shown as it is
     return trim(String(new Error().stack));
   } catch {
     return "";
   } finally {
     Error.stackTraceLimit = limit;
   }
-}
+};
 
-function trim(stack) {
-  const lines = stack.split("\n"),
-    i = lines.findIndex((x, i) => i > 0 && !ours(x));
+const trim = (stack) => {
+  const lines = stack.split("\n");
+  const i = lines.findIndex((line, index) => index > 0 && !ours(line));
 
   return i === -1 ? stack : lines.slice(0, i + 1).join("\n");
-}
+};

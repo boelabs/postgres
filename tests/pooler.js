@@ -1,16 +1,16 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 
-const mode = process.argv[2],
-  port = process.env.POOLER_PORT || "6432",
-  expected = JSON.parse(
-    fs.readFileSync(new URL("pooler.json", import.meta.url), "utf-8")
-  ),
-  allowed = new Set([
-    ...expected.always,
-    ...expected.flaky,
-    ...(expected[mode] || []),
-  ]);
+const mode = process.argv.at(2);
+const port = process.env.POOLER_PORT || "6432";
+const expected = JSON.parse(
+  fs.readFileSync(new URL("pooler.json", import.meta.url), "utf-8")
+);
+const allowed = new Set([
+  ...expected.always,
+  ...expected.flaky,
+  ...(expected[mode] || []),
+]);
 
 if (!expected[mode]) {
   throw new Error(
@@ -34,19 +34,21 @@ const child = spawn(
 );
 
 let output = "";
-child.stdout.on("data", (x) => ((output += x), process.stdout.write(x)));
+child.stdout.on("data", (x) => {
+  output += x;
+  process.stdout.write(x);
+});
 child.stderr.on("data", (x) => (output += x));
 
 const done = setInterval(
   () =>
-    /\d+ of \d+ failed|🎉/.test(output.slice(-3000)) &&
+    /\d+ of \d+ failed|🎉/u.test(output.slice(-3000)) &&
     setTimeout(finish, 2000),
   1000
 );
-child.on("close", finish);
 
 let finished = false;
-function finish() {
+const finish = () => {
   if (finished) {
     return;
   }
@@ -55,24 +57,27 @@ function finish() {
   clearInterval(done);
   child.kill();
   const failed = [
-      ...output.matchAll(/⛔️ (.+?) at ([a-z]+\.js):\d+ failed/g),
-    ].map((x) => `${x[2]}: ${x[1]}`),
-    unexpected = failed.filter((x) => !allowed.has(x)),
-    fixed = [...allowed].filter(
-      (x) => !failed.includes(x) && (expected[mode] || []).includes(x)
-    );
+    ...output.matchAll(/⛔️ (?<name>.+?) at (?<file>[a-z]+\.js):\d+ failed/gu),
+  ].map((x) => `${x.groups.file}: ${x.groups.name}`);
+  const unexpected = failed.filter((x) => !allowed.has(x));
+  const fixed = [...allowed].filter(
+    (x) => !failed.includes(x) && (expected[mode] || []).includes(x)
+  );
   console.log(
     `\n${failed.length} failed through the pooler in ${mode} mode, ${
       failed.length - unexpected.length
     } of them expected`
   );
-  fixed.length &&
+  if (fixed.length) {
     console.log(
       `Expected to fail but passed, so no longer needs to be listed:\n  ${fixed.join(
         "\n  "
       )}`
     );
-  unexpected.length &&
+  }
+  if (unexpected.length) {
     console.log(`⚠️ Unexpected failures:\n  ${unexpected.join("\n  ")}`);
+  }
   process.exitCode = unexpected.length ? 1 : 0;
-}
+};
+child.on("close", finish);

@@ -1,8 +1,10 @@
 import { own } from "./connection.js";
 
-const noop = () => {},
-  statusInterval = 10_000,
-  epoch = BigInt(Date.UTC(2000, 0, 1)) * 1000n;
+const noop = () => {
+  // Swallows a rejection that is handled elsewhere, or stands in for a callback nobody passed.
+};
+const statusInterval = 10_000;
+const epoch = BigInt(Date.UTC(2000, 0, 1)) * 1000n;
 
 const lsnToString = (x) =>
   `${(x >> 32n).toString(16).toUpperCase()}/${(x & 0xff_ff_ff_ffn)
@@ -10,106 +12,81 @@ const lsnToString = (x) =>
     .toUpperCase()}`;
 
 export default function Subscribe(postgres, options) {
-  const subscribers = new Map(),
-    persistent = !!options.slot,
-    slot = options.slot || `postgresjs_${Math.random().toString(36).slice(2)}`,
-    state = {},
-    timers = options.timers;
+  const subscribers = new Map();
+  const persistent = !!options.slot;
+  const slot =
+    options.slot || `postgresjs_${Math.random().toString(36).slice(2)}`;
+  const state = {};
+  const { timers } = options;
 
-  let connection,
-    current = null,
-    ended = false,
-    retries = 0;
+  let connection;
+  let current = null;
+  let ended = false;
+  let retries = 0;
 
-  const sql = (subscribe.sql = postgres({
-    ...options,
-    query_timeout: 0,
-    transform: { column: {}, value: {}, row: {} },
-    max: 1,
-    idle_timeout: null,
-    max_lifetime: null,
-    connection: {
-      ...options.connection,
-      replication: "database",
-    },
-    onclose: () => {
-      current && current.stop();
-      current = null;
-      state.pid = state.secret = undefined;
-      ended || restart();
-    },
-    no_subscribe: true,
-    eager_types: true,
-  }));
-
-  const end = sql.end,
-    close = sql.close;
-
-  sql.end = async () => {
-    ended = true;
-    current && (await current.finish());
-    return end();
-  };
-
-  sql.close = async () => {
-    current && (await current.finish());
-    return close();
-  };
-
-  return subscribe;
-
-  async function subscribe(event, fn, onsubscribe = noop, onerror) {
-    event = parseEvent(event);
+  // oxlint-disable-next-line require-await, default-param-last -- async so a bad event rejects instead of throwing; the positional signature (and its length) is public
+  const subscribe = async (event, fn, onsubscribe = noop, onerror) => {
+    const name = parseEvent(event);
 
     connection ||= init();
 
-    const subscriber = { fn, onsubscribe, onerror };
-    const fns = subscribers.has(event)
-      ? subscribers.get(event).add(subscriber)
-      : subscribers.set(event, new Set([subscriber])).get(event);
+    const subscriber = { fn, onerror, onsubscribe };
+    const fns = subscribers.has(name)
+      ? subscribers.get(name).add(subscriber)
+      : subscribers.set(name, new Set([subscriber])).get(name);
 
     const unsubscribe = () => {
       fns.delete(subscriber);
-      fns.size === 0 && subscribers.delete(event);
+      if (fns.size === 0) {
+        subscribers.delete(name);
+      }
     };
 
     return connection.then(
       () => {
         onsubscribe();
-        return { unsubscribe, state, sql };
+        return { sql, state, unsubscribe };
       },
+      // oxlint-disable-next-line promise/prefer-await-to-callbacks -- awaiting would settle the subscription on different ticks
       (error) => {
         unsubscribe();
         connection = null;
         throw error;
       }
     );
-  }
+  };
 
-  function restart() {
-    const delay = Math.min(100 * 2 ** retries++, 10_000);
-    connection = new Promise((r) =>
-      timers.setTimeout(r, retries === 1 ? 0 : delay)
-    )
+  const restart = () => {
+    const delay = Math.min(100 * 2 ** retries, 10_000);
+    retries += 1;
+    const { promise: waited, resolve } = Promise.withResolvers();
+    timers.setTimeout(resolve, retries === 1 ? 0 : delay);
+    connection = waited
       .then(() => ended || init())
       .then(
         (x) => {
           retries = 0;
-          ended ||
-            subscribers.forEach((event) =>
-              event.forEach(({ onsubscribe }) => onsubscribe())
-            );
+          if (!ended) {
+            for (const event of subscribers.values()) {
+              for (const { onsubscribe } of event) {
+                onsubscribe();
+              }
+            }
+          }
           return x;
         },
+        // oxlint-disable-next-line promise/prefer-await-to-callbacks -- part of the reconnect chain stored in connection, which awaiting would turn into another promise and other ticks
         (error) => {
           report(error);
-          ended || restart();
+          if (!ended) {
+            restart();
+          }
         }
       );
     connection.catch(noop);
-  }
+  };
 
-  async function init() {
+  const init = async () => {
     if (!options.publications) {
       throw new Error("Missing publication names");
     }
@@ -133,71 +110,148 @@ export default function Subscribe(postgres, options) {
     state.pid = query.state && query.state.pid;
     state.secret = query.state && query.state.secret;
     return current;
-  }
+  };
 
-  function Stream(stream) {
+  const Stream = (stream) => {
     const relations = {};
-    let acked = 0n,
-      received = 0n,
-      transaction = null,
-      queue = null,
-      failed = false,
-      stopped = false,
-      timer = timers.setTimeout(tick, statusInterval),
-      soon = null;
+    let acked = 0n;
+    let received = 0n;
+    let transaction = null;
+    let queue = null;
+    let failed = false;
+    let stopped = false;
+    let timer = null;
+    let soon = null;
 
-    stream.on("data", data);
-    stream.on("error", (error) => failed || report(error));
-    stream.on("close", () => {
-      const unexpected = !stopped;
-      stop();
-      unexpected && close();
-    });
+    const idle = () => !transaction && !queue;
 
-    return { stop, finish };
-
-    function data(x) {
-      if (x[0] === 0x77) {
-        received = max(received, x.readBigUInt64BE(9));
-        parse(
-          x.subarray(25),
-          relations,
-          sql.options.parsers,
-          message,
-          options.transform
-        );
-      } else if (x[0] === 0x6b) {
-        received = max(received, x.readBigUInt64BE(1));
-        idle() && (acked = max(acked, received));
-        x[17] && status();
+    const status = () => {
+      if (stopped || stream.destroyed || !stream.writable) {
+        return;
       }
-    }
 
-    function message(kind, x, info) {
-      if (kind === "begin") {
-        return (transaction = {
-          lsn: x.lsn,
-          end: null,
-          time: x.time,
-          xid: x.xid,
+      const x = Buffer.alloc(34);
+      x[0] = 0x72;
+      x.writeBigUInt64BE(acked, 1);
+      x.writeBigUInt64BE(acked, 9);
+      x.writeBigUInt64BE(acked, 17);
+      x.writeBigInt64BE(BigInt(Date.now()) * 1000n - epoch, 25);
+      stream.write(x);
+    };
+
+    const tick = () => {
+      timer = null;
+      if (stopped) {
+        return;
+      }
+
+      status();
+      timer = timers.setTimeout(tick, statusInterval);
+    };
+
+    const stop = () => {
+      if (stopped) {
+        return;
+      }
+
+      stopped = true;
+      if (timer) {
+        timers.clearTimeout(timer);
+      }
+      if (soon) {
+        timers.clearImmediate(soon);
+      }
+      timer = null;
+      soon = null;
+    };
+
+    const fail = (error, subscriber) => {
+      report(error, subscriber);
+      if (!persistent || failed) {
+        return;
+      }
+
+      failed = true;
+      queue = null;
+      stop();
+      stream.destroy(
+        new Error("A subscriber failed, so the transaction is delivered again")
+      );
+      close();
+    };
+
+    const call = (pending, event, row, info) => {
+      if (!subscribers.has(event)) {
+        return;
+      }
+      for (const subscriber of subscribers.get(event)) {
+        let result;
+        try {
+          result = subscriber.fn(row, info, event);
+        } catch (error) {
+          fail(error, subscriber);
+          continue;
+        }
+        if (result && typeof result.then === "function") {
+          // oxlint-disable-next-line promise/prefer-await-to-callbacks -- the subscriber's own promise, collected for Promise.all; awaiting here would serialize subscribers
+          pending.push(result.catch((error) => fail(error, subscriber)));
+        }
+      }
+    };
+
+    const handle = (row, info) => {
+      const path = `${info.relation.schema}.${info.relation.table}`;
+      const key =
+        row && info.relation.keys.length
+          ? `=${info.relation.keys.map((x) => row[x.name])}`
+          : "";
+      const pending = [];
+
+      call(pending, "*", row, info);
+      call(pending, `*:${path}`, row, info);
+      if (key) {
+        call(pending, `*:${path}${key}`, row, info);
+      }
+      call(pending, info.command, row, info);
+      call(pending, `${info.command}:${path}`, row, info);
+      if (key) {
+        call(pending, `${info.command}:${path}${key}`, row, info);
+      }
+      return pending.length ? Promise.all(pending) : null;
+    };
+
+    const commit = (done) => {
+      acked = max(acked, done.end);
+      if (persistent && !soon) {
+        soon = timers.setImmediate(() => {
+          soon = null;
+          status();
         });
       }
+    };
 
-      if (kind === "commit") {
-        const done = transaction;
-        done.end = x.end;
-        transaction = null;
-        return run(() => commit(done));
+    // The queue is always a native promise, so awaiting it resumes on the same tick as then().
+    const drain = async () => {
+      const at = queue;
+      try {
+        await at;
+      } catch {
+        return;
+      }
+      if (queue !== at) {
+        if (queue) {
+          drain();
+        }
+        return;
       }
 
-      const at = transaction || {};
-      info.lsn = at.lsn && lsnToString(at.lsn);
-      info.time = at.time;
-      info.xid = at.xid;
-      run(() => handle(x, info));
-    }
+      queue = null;
+      if (!stopped && !failed) {
+        stream.resume();
+      }
+    };
 
-    function run(fn) {
+    const run = (fn) => {
       if (failed || stopped) {
         return;
       }
@@ -213,173 +267,197 @@ export default function Subscribe(postgres, options) {
         stream.pause();
         drain();
       }
-    }
+    };
 
-    function drain() {
-      const at = queue;
-      at.then(() => {
-        if (queue !== at) {
-          return queue && drain();
+    const message = (kind, x, info) => {
+      if (kind === "begin") {
+        transaction = {
+          end: null,
+          lsn: x.lsn,
+          time: x.time,
+          xid: x.xid,
+        };
+        return transaction;
+      }
+
+      if (kind === "commit") {
+        const done = transaction;
+        done.end = x.end;
+        transaction = null;
+        return run(() => commit(done));
+      }
+
+      const at = transaction || {};
+      info.lsn = at.lsn && lsnToString(at.lsn);
+      info.time = at.time;
+      info.xid = at.xid;
+      run(() => handle(x, info));
+    };
+
+    const data = (x) => {
+      if (x[0] === 0x77) {
+        received = max(received, x.readBigUInt64BE(9));
+        parse(
+          x.subarray(25),
+          relations,
+          sql.options.parsers,
+          message,
+          options.transform
+        );
+      } else if (x[0] === 0x6b) {
+        received = max(received, x.readBigUInt64BE(1));
+        if (idle()) {
+          acked = max(acked, received);
         }
-
-        queue = null;
-        stopped || failed || stream.resume();
-      }, noop);
-    }
-
-    function commit(done) {
-      acked = max(acked, done.end);
-      persistent &&
-        !soon &&
-        (soon = timers.setImmediate(() => ((soon = null), status())));
-    }
-
-    function handle(row, info) {
-      const path = `${info.relation.schema}.${info.relation.table}`,
-        key =
-          row && info.relation.keys.length
-            ? `=${info.relation.keys.map((x) => row[x.name])}`
-            : "",
-        pending = [];
-
-      call(pending, "*", row, info);
-      call(pending, `*:${path}`, row, info);
-      key && call(pending, `*:${path}${key}`, row, info);
-      call(pending, info.command, row, info);
-      call(pending, `${info.command}:${path}`, row, info);
-      key && call(pending, `${info.command}:${path}${key}`, row, info);
-      return pending.length ? Promise.all(pending) : null;
-    }
-
-    function call(pending, event, row, info) {
-      subscribers.has(event) &&
-        subscribers.get(event).forEach((subscriber) => {
-          let result;
-          try {
-            result = subscriber.fn(row, info, event);
-          } catch (error) {
-            return fail(error, subscriber);
-          }
-          result &&
-            typeof result.then === "function" &&
-            pending.push(result.catch((error) => fail(error, subscriber)));
-        });
-    }
-
-    function fail(error, subscriber) {
-      report(error, subscriber);
-      if (!persistent || failed) {
-        return;
+        if (x[17]) {
+          status();
+        }
       }
+    };
 
-      failed = true;
-      queue = null;
-      stop();
-      stream.destroy(
-        new Error("A subscriber failed, so the transaction is delivered again")
-      );
-      close();
-    }
-
-    function idle() {
-      return !transaction && !queue;
-    }
-
-    function tick() {
-      timer = null;
-      if (stopped) {
-        return;
+    const finish = async () => {
+      if (queue) {
+        await queue.catch(noop);
       }
-
-      status();
-      timer = timers.setTimeout(tick, statusInterval);
-    }
-
-    function status() {
-      if (stopped || stream.destroyed || !stream.writable) {
-        return;
-      }
-
-      const x = Buffer.alloc(34);
-      x[0] = 0x72;
-      x.writeBigUInt64BE(acked, 1);
-      x.writeBigUInt64BE(acked, 9);
-      x.writeBigUInt64BE(acked, 17);
-      x.writeBigInt64BE(BigInt(Date.now()) * 1000n - epoch, 25);
-      stream.write(x);
-    }
-
-    async function finish() {
-      queue && (await queue.catch(noop));
       if (!failed) {
-        idle() && (acked = max(acked, received));
+        if (idle()) {
+          acked = max(acked, received);
+        }
         status();
       }
       stop();
-      stream.destroyed ||
-        (await new Promise((r) => (stream.once("close", r), stream.end())));
-    }
-
-    function stop() {
-      if (stopped) {
-        return;
+      if (!stream.destroyed) {
+        const { promise: closed, resolve } = Promise.withResolvers();
+        stream.once("close", resolve);
+        stream.end();
+        await closed;
       }
+    };
 
-      stopped = true;
-      timer && timers.clearTimeout(timer);
-      soon && timers.clearImmediate(soon);
-      timer = soon = null;
-    }
-  }
+    timer = timers.setTimeout(tick, statusInterval);
 
-  function report(error, subscriber) {
+    stream.on("data", data);
+    stream.on("error", (error) => failed || report(error));
+    stream.on("close", () => {
+      const unexpected = !stopped;
+      stop();
+      if (unexpected) {
+        close();
+      }
+    });
+
+    return { finish, stop };
+  };
+
+  const report = (error, subscriber) => {
     const handlers = subscriber
       ? [subscriber.onerror]
-      : [...subscribers.values()].flatMap((x) => [...x].map((x) => x.onerror));
+      : [...subscribers.values()].flatMap((set) =>
+          [...set].map((x) => x.onerror)
+        );
 
     const listeners = handlers.filter(Boolean);
-    listeners.length
-      ? listeners.forEach((fn) => fn(error))
-      : console.error("@boelabs/postgres: logical replication error", error); // eslint-disable-line
-  }
+    if (listeners.length) {
+      for (const fn of listeners) {
+        fn(error);
+      }
+    } else {
+      // With no onerror to call, the error must not vanish.
+      console.error("@boelabs/postgres: logical replication error", error);
+    }
+  };
+
+  const sql = postgres({
+    ...options,
+    connection: {
+      ...options.connection,
+      replication: "database",
+    },
+    eager_types: true,
+    idle_timeout: null,
+    max: 1,
+    max_lifetime: null,
+    no_subscribe: true,
+    onclose: () => {
+      if (current) {
+        current.stop();
+      }
+      current = null;
+      state.secret = undefined;
+      state.pid = undefined;
+      if (!ended) {
+        restart();
+      }
+    },
+    query_timeout: 0,
+    transform: { column: {}, row: {}, value: {} },
+  });
+  subscribe.sql = sql;
+
+  const { end, close } = sql;
+
+  sql.end = async () => {
+    ended = true;
+    if (current) {
+      await current.finish();
+    }
+    return end();
+  };
+
+  sql.close = async () => {
+    if (current) {
+      await current.finish();
+    }
+    return close();
+  };
+
+  return subscribe;
 }
 
-function max(a, b) {
-  return a > b ? a : b;
-}
+const max = (a, b) => (a > b ? a : b);
 
-function Time(x) {
-  return new Date(Date.UTC(2000, 0, 1) + Number(x / 1000n));
-}
+const Time = (x) => new Date(Date.UTC(2000, 0, 1) + Number(x / 1000n));
 
-function parse(x, relations, parsers, message, transform) {
-  const type = x[0];
+const parse = (x, relations, parsers, message, transform) => {
+  const [type] = x;
   if (type === 82) {
     let i = 1;
-    const r = (relations[x.readUInt32BE(i)] = {
-      schema:
-        x.toString("utf-8", (i += 4), (i = x.indexOf(0, i))) || "pg_catalog",
-      table: x.toString("utf-8", i + 1, (i = x.indexOf(0, i + 1))),
-      columns: new Array(x.readUInt16BE((i += 2))),
-      keys: [],
-    });
+    const id = x.readUInt32BE(i);
+    i += 4;
+    const schemaEnd = x.indexOf(0, i);
+    const schema = x.toString("utf-8", i, schemaEnd) || "pg_catalog";
+    i = schemaEnd;
+    const tableEnd = x.indexOf(0, i + 1);
+    const table = x.toString("utf-8", i + 1, tableEnd);
+    i = tableEnd + 2;
+    const columns = Array.from({ length: x.readUInt16BE(i) });
+    // oxlint-disable-next-line sort-keys -- users see the relation as info.relation, so its keys keep the order they print in
+    const r = { schema, table, columns, keys: [] };
+    relations[id] = r;
     i += 2;
 
-    let columnIndex = 0,
-      column;
+    let columnIndex = 0;
 
     while (i < x.length) {
-      column = r.columns[columnIndex++] = {
-        key: x[i++],
-        name: transform.column.from
-          ? transform.column.from(x.toString("utf-8", i, (i = x.indexOf(0, i))))
-          : x.toString("utf-8", i, (i = x.indexOf(0, i))),
-        type: x.readUInt32BE((i += 1)),
-        parser: parsers[x.readUInt32BE(i)],
-        atttypmod: x.readUInt32BE((i += 4)),
-      };
+      const key = x[i];
+      i += 1;
+      const nameEnd = x.indexOf(0, i);
+      const raw = x.toString("utf-8", i, nameEnd);
+      i = nameEnd;
+      const name = transform.column.from ? transform.column.from(raw) : raw;
+      i += 1;
+      const columnType = x.readUInt32BE(i);
+      const parser = parsers[x.readUInt32BE(i)];
+      i += 4;
+      const atttypmod = x.readUInt32BE(i);
+      // oxlint-disable-next-line sort-keys -- users see the columns in info.relation, so their keys keep the order they print in
+      const column = { key, name, type: columnType, parser, atttypmod };
+      r.columns[columnIndex] = column;
+      columnIndex += 1;
 
-      column.key && r.keys.push(column);
+      if (column.key) {
+        r.keys.push(column);
+      }
       i += 4;
     }
   } else if (type === 66) {
@@ -389,10 +467,9 @@ function parse(x, relations, parsers, message, transform) {
       xid: x.readUInt32BE(17),
     });
   } else if (type === 67) {
-    message("commit", {
-      lsn: x.readBigUInt64BE(2),
-      end: x.readBigUInt64BE(10),
-    });
+    const lsn = x.readBigUInt64BE(2);
+    const end = x.readBigUInt64BE(10);
+    message("commit", { end, lsn });
   } else if (type === 73) {
     const relation = relations[x.readUInt32BE(1)];
     message("change", tuples(x, relation.columns, 8, transform).row, {
@@ -409,6 +486,7 @@ function parse(x, relations, parsers, message, transform) {
       key || x[i] === 79
         ? tuples(x, relation.columns, (i += 3), transform).row
         : null,
+      // oxlint-disable-next-line sort-keys -- the info users receive keeps its documented key order
       { command: "delete", relation, key }
     );
   } else if (type === 85) {
@@ -421,9 +499,12 @@ function parse(x, relations, parsers, message, transform) {
         ? tuples(x, relation.columns, (i += 3), transform)
         : null;
 
-    xs && (i = xs.i);
+    if (xs) {
+      ({ i } = xs);
+    }
 
     const { row } = tuples(x, relation.columns, i + 3, transform);
+    // oxlint-disable-next-line sort-keys -- the info users receive keeps its documented key order
     message("change", row, {
       command: "update",
       relation,
@@ -431,9 +512,10 @@ function parse(x, relations, parsers, message, transform) {
       old: xs && xs.row,
     });
   } else if (type === 84) {
-    const count = x.readUInt32BE(1),
-      flags = x[5];
-    for (let i = 0; i < count; i++) {
+    const count = x.readUInt32BE(1);
+    const flags = x.at(5);
+    for (let i = 0; i < count; i += 1) {
+      // oxlint-disable-next-line sort-keys -- the info users receive keeps its documented key order
       message("change", null, {
         command: "truncate",
         relation: relations[x.readUInt32BE(6 + i * 4)],
@@ -442,41 +524,45 @@ function parse(x, relations, parsers, message, transform) {
       });
     }
   }
-}
+};
 
-function tuples(x, columns, xi, transform) {
-  let type, column, value;
-
+const tuples = (x, columns, start, transform) => {
+  let xi = start;
   const row = {};
-  for (let i = 0; i < columns.length; i++) {
-    type = x[xi++];
-    column = columns[i];
-    value =
-      type === 110
-        ? null
-        : type === 117
-          ? undefined
-          : column.parser(
-              x.toString("utf-8", xi + 4, (xi += 4 + x.readUInt32BE(xi)))
-            );
+  for (const column of columns) {
+    const type = x[xi];
+    xi += 1;
+    let value;
+    if (type === 110) {
+      value = null;
+    } else if (type === 117) {
+      value = undefined;
+    } else {
+      const end = xi + 4 + x.readUInt32BE(xi);
+      const text = x.toString("utf-8", xi + 4, end);
+      xi = end;
+      value = column.parser(text);
+    }
 
     value = transform.value.from ? transform.value.from(value, column) : value;
-    column.name === "__proto__"
-      ? own(row, column.name, value)
-      : (row[column.name] = value);
+    if (column.name === "__proto__") {
+      own(row, column.name, value);
+    } else {
+      row[column.name] = value;
+    }
   }
 
   return { i: xi, row: transform.row.from ? transform.row.from(row) : row };
-}
+};
 
-function parseEvent(x) {
-  const [, command, path, key] = x.match(
-    /^(\*|insert|update|delete|truncate)?:?([^.]+?\.?[^=]+)?=?(.+)?/i
-  );
+const parseEvent = (x) => {
+  const { command, path, key } = x.match(
+    /^(?<command>\*|insert|update|delete|truncate)?:?(?<path>[^.]+?\.?[^=]+)?=?(?<key>.+)?/iu
+  ).groups;
 
   return (
     (command || "*") +
-    (path ? `:${path.indexOf(".") === -1 ? `public.${path}` : path}` : "") +
+    (path ? `:${path.includes(".") ? path : `public.${path}`}` : "") +
     (key ? `=${key}` : "")
   );
-}
+};

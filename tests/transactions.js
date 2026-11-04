@@ -1,11 +1,16 @@
 import net from "node:net";
+import { setImmediate as immediate } from "node:timers/promises";
 
 import { postgres, sql, options, delay, idle_timeout } from "./setup.js";
 import { t } from "./test.js";
 
+const noop = () => {
+  // Deliberately empty: the test does not look at what it is given.
+};
+
 t("Throws on illegal transactions", async () => {
-  const sql = postgres({ ...options, max: 2, fetch_types: false });
-  const error = await sql`begin`.catch((e) => e);
+  const db = postgres({ ...options, fetch_types: false, max: 2 });
+  const error = await db`begin`.catch((beginError) => beginError);
   return [error.code, "UNSAFE_TRANSACTION"];
 });
 
@@ -14,11 +19,11 @@ t("Transaction throws", async () => {
   return [
     "22P02",
     await sql
-      .begin(async (sql) => {
-        await sql`insert into test values(1)`;
-        await sql`insert into test values('hej')`;
+      .begin(async (tx) => {
+        await tx`insert into test values(1)`;
+        await tx`insert into test values('hej')`;
       })
-      .catch((x) => x.code),
+      .catch((error) => error.code),
     await sql`drop table test`,
   ];
 });
@@ -26,12 +31,13 @@ t("Transaction throws", async () => {
 t("Transaction rolls back", async () => {
   await sql`create table test (a int)`;
   await sql
-    .begin(async (sql) => {
-      await sql`insert into test values(1)`;
-      await sql`insert into test values('hej')`;
+    .begin(async (tx) => {
+      await tx`insert into test values(1)`;
+      await tx`insert into test values('hej')`;
     })
-    .catch(() => {});
-  return [0, (await sql`select a from test`).count, await sql`drop table test`];
+    .catch(noop);
+  const { count } = await sql`select a from test`;
+  return [0, count, await sql`drop table test`];
 });
 
 t("Transaction throws on uncaught savepoint", async () => {
@@ -40,14 +46,14 @@ t("Transaction throws on uncaught savepoint", async () => {
   return [
     "fail",
     await sql
-      .begin(async (sql) => {
-        await sql`insert into test values(1)`;
-        await sql.savepoint(async (sql) => {
-          await sql`insert into test values(2)`;
+      .begin(async (tx) => {
+        await tx`insert into test values(1)`;
+        await tx.savepoint(async (inner) => {
+          await inner`insert into test values(2)`;
           throw new Error("fail");
         });
       })
-      .catch((err) => err.message),
+      .catch((error) => error.message),
     await sql`drop table test`,
   ];
 });
@@ -58,10 +64,10 @@ t("Transaction throws on uncaught named savepoint", async () => {
   return [
     "fail",
     await sql
-      .begin(async (sql) => {
-        await sql`insert into test values(1)`;
-        await sql.savepoit("watpoint", async (sql) => {
-          await sql`insert into test values(2)`;
+      .begin(async (tx) => {
+        await tx`insert into test values(1)`;
+        await tx.savepoit("watpoint", async (inner) => {
+          await inner`insert into test values(2)`;
           throw new Error("fail");
         });
       })
@@ -72,28 +78,25 @@ t("Transaction throws on uncaught named savepoint", async () => {
 
 t("Transaction succeeds on caught savepoint", async () => {
   await sql`create table test (a int)`;
-  await sql.begin(async (sql) => {
-    await sql`insert into test values(1)`;
-    await sql
-      .savepoint(async (sql) => {
-        await sql`insert into test values(2)`;
+  await sql.begin(async (tx) => {
+    await tx`insert into test values(1)`;
+    await tx
+      .savepoint(async (inner) => {
+        await inner`insert into test values(2)`;
         throw new Error("please rollback");
       })
-      .catch(() => {});
-    await sql`insert into test values(3)`;
+      .catch(noop);
+    await tx`insert into test values(3)`;
   });
 
-  return [
-    "2",
-    (await sql`select count(1) from test`)[0].count,
-    await sql`drop table test`,
-  ];
+  const [{ count }] = await sql`select count(1) from test`;
+  return ["2", count, await sql`drop table test`];
 });
 
 t("Savepoint returns Result", async () => {
   let result;
-  await sql.begin(async (sql) => {
-    result = await sql.savepoint((sql) => sql`select 1 as x`);
+  await sql.begin(async (tx) => {
+    result = await tx.savepoint((inner) => inner`select 1 as x`);
   });
 
   return [1, result[0].x];
@@ -102,81 +105,73 @@ t("Savepoint returns Result", async () => {
 t("Prepared transaction", async () => {
   await sql`create table test (a int)`;
 
-  await sql.begin(async (sql) => {
-    await sql`insert into test values(1)`;
-    await sql.prepare("tx1");
+  await sql.begin(async (tx) => {
+    await tx`insert into test values(1)`;
+    await tx.prepare("tx1");
   });
 
   await sql`commit prepared 'tx1'`;
 
-  return [
-    "1",
-    (await sql`select count(1) from test`)[0].count,
-    await sql`drop table test`,
-  ];
+  const [{ count }] = await sql`select count(1) from test`;
+  return ["1", count, await sql`drop table test`];
 });
 
 t("Transaction requests are executed implicitly", async () => {
-  const sql = postgres({ debug: true, idle_timeout: 1, fetch_types: false });
-  return [
-    "testing",
-    (
-      await sql.begin((sql) => [
-        sql`select set_config('postgres_js.test', 'testing', true)`,
-        sql`select current_setting('postgres_js.test') as x`,
-      ])
-    )[1][0].x,
-  ];
+  const db = postgres({ debug: true, fetch_types: false, idle_timeout: 1 });
+  const [, [{ x }]] = await db.begin((tx) => [
+    tx`select set_config('postgres_js.test', 'testing', true)`,
+    tx`select current_setting('postgres_js.test') as x`,
+  ]);
+  return ["testing", x];
 });
 
 t("Uncaught transaction request errors bubbles to transaction", async () => [
   "42703",
   await sql
-    .begin((sql) => [
-      sql`select wat`,
-      sql`select current_setting('postgres_js.test') as x, ${1} as a`,
+    .begin((tx) => [
+      tx`select wat`,
+      tx`select current_setting('postgres_js.test') as x, ${1} as a`,
     ])
-    .catch((e) => e.code),
+    .catch((error) => error.code),
 ]);
 
-t("Fragments in transactions", async () => [
-  true,
-  (await sql.begin((sql) => sql`select true as x where ${sql`1=1`}`))[0].x,
-]);
+t("Fragments in transactions", async () => {
+  const [{ x }] = await sql.begin(
+    (tx) => tx`select true as x where ${tx`1=1`}`
+  );
+  return [true, x];
+});
 
 t("Transaction rejects with rethrown error", async () => [
   "WAT",
   await sql
-    .begin(async (sql) => {
+    .begin(async (tx) => {
       try {
-        await sql`select exception`;
+        await tx`select exception`;
       } catch {
         throw new Error("WAT");
       }
     })
-    .catch((e) => e.message),
+    .catch((error) => error.message),
 ]);
 
 t("Parallel transactions", async () => {
   await sql`create table test (a int)`;
+  const results = await Promise.all([
+    sql.begin((tx) => tx`select 1`),
+    sql.begin((tx) => tx`select 1`),
+  ]);
   return [
     "11",
-    (
-      await Promise.all([
-        sql.begin((sql) => sql`select 1`),
-        sql.begin((sql) => sql`select 1`),
-      ])
-    )
-      .map((x) => x.count)
-      .join(""),
+    results.map((x) => x.count).join(""),
     await sql`drop table test`,
   ];
 });
 
 t("Many transactions at beginning of connection", async () => {
-  const sql = postgres(options);
+  const db = postgres(options);
   const xs = await Promise.all(
-    Array.from({ length: 100 }, () => sql.begin((sql) => sql`select 1`))
+    Array.from({ length: 100 }, () => db.begin((tx) => tx`select 1`))
   );
   return [100, xs.length];
 });
@@ -184,46 +179,47 @@ t("Many transactions at beginning of connection", async () => {
 t("Transactions array", async () => {
   await sql`create table test (a int)`;
 
+  const results = await sql.begin((tx) => [
+    tx`select 1`.then((x) => x),
+    tx`select 1`,
+  ]);
   return [
     "11",
-    (await sql.begin((sql) => [sql`select 1`.then((x) => x), sql`select 1`]))
-      .map((x) => x.count)
-      .join(""),
+    results.map((x) => x.count).join(""),
     await sql`drop table test`,
   ];
 });
 
 t("Transaction waits", async () => {
   await sql`create table test (a int)`;
-  await sql.begin(async (sql) => {
-    await sql`insert into test values(1)`;
-    await sql
-      .savepoint(async (sql) => {
-        await sql`insert into test values(2)`;
+  await sql.begin(async (tx) => {
+    await tx`insert into test values(1)`;
+    await tx
+      .savepoint(async (inner) => {
+        await inner`insert into test values(2)`;
         throw new Error("please rollback");
       })
-      .catch(() => {});
-    await sql`insert into test values(3)`;
+      .catch(noop);
+    await tx`insert into test values(3)`;
   });
 
+  const results = await Promise.all([
+    sql.begin((tx) => tx`select 1`),
+    sql.begin((tx) => tx`select 1`),
+  ]);
   return [
     "11",
-    (
-      await Promise.all([
-        sql.begin((sql) => sql`select 1`),
-        sql.begin((sql) => sql`select 1`),
-      ])
-    )
-      .map((x) => x.count)
-      .join(""),
+    results.map((x) => x.count).join(""),
     await sql`drop table test`,
   ];
 });
 
-t("Helpers in Transaction", async () => [
-  "1",
-  (await sql.begin(async (sql) => await sql`select ${sql({ x: 1 })}`))[0].x,
-]);
+t("Helpers in Transaction", async () => {
+  const [{ x }] = await sql.begin(
+    async (tx) => await tx`select ${tx({ x: 1 })}`
+  );
+  return ["1", x];
+});
 
 t(
   "Connection errors are caught using begin()",
@@ -233,13 +229,13 @@ t(
   async () => {
     let error;
     try {
-      const sql = postgres({ host: "localhost", port: 1 });
+      const db = postgres({ host: "localhost", port: 1 });
 
-      await sql.begin(async (sql) => {
-        await sql`insert into test (label, value) values (${1}, ${2})`;
+      await db.begin(async (tx) => {
+        await tx`insert into test (label, value) values (${1}, ${2})`;
       });
-    } catch (err) {
-      error = err;
+    } catch (connectError) {
+      error = connectError;
     }
 
     return [
@@ -253,8 +249,8 @@ t(
 t("Throws correct error when retrying in transactions", async () => {
   await sql`create table test(x int)`;
   const error = await sql
-    .begin((sql) => sql`insert into test (x) values (${sql.typed(false, 16)})`)
-    .catch((e) => e);
+    .begin((tx) => tx`insert into test (x) values (${tx.typed(false, 16)})`)
+    .catch((insertError) => insertError);
   return [error.code, "42804", sql`drop table test`];
 });
 
@@ -262,68 +258,74 @@ t(
   "Properly throws routine error on not prepared statements in transaction",
   async () => {
     const { routine } = await sql
-      .begin((sql) => [
-        sql`create table x (x text[])`,
-        sql`insert into x(x) values (('a', 'b'))`,
+      .begin((tx) => [
+        tx`create table x (x text[])`,
+        tx`insert into x(x) values (('a', 'b'))`,
       ])
-      .catch((e) => e);
+      .catch((error) => error);
 
     return ["transformAssignedExpr", routine];
   }
 );
 
 t("Catches type serialize errors in transactions", async () => {
-  const sql = postgres({
+  const db = postgres({
     idle_timeout,
     types: {
       text: {
         from: 25,
-        to: 25,
         parse: (x) => x,
         serialize: () => {
           throw new Error("watSerialize");
         },
+        to: 25,
       },
     },
   });
 
   return [
     "watSerialize",
-    await sql
-      .begin((sql) => (sql`select 1`, sql`select ${"wat"}`))
-      .catch((e) => e.message),
+    await db
+      .begin((tx) => {
+        void tx`select 1`;
+        return tx`select ${"wat"}`;
+      })
+      .catch((error) => error.message),
   ];
 });
 
 t("Catches type parse errors in transactions", async () => {
-  const sql = postgres({
+  const db = postgres({
     idle_timeout,
     types: {
       text: {
         from: 25,
-        to: 25,
         parse: () => {
           throw new Error("watParse");
         },
         serialize: (x) => x,
+        to: 25,
       },
     },
   });
 
   return [
     "watParse",
-    await sql
-      .begin((sql) => (sql`select 1`, sql`select 'wat'`))
-      .catch((e) => e.message),
+    await db
+      .begin((tx) => {
+        void tx`select 1`;
+        return tx`select 'wat'`;
+      })
+      .catch((error) => error.message),
   ];
 });
 
 t("Prevent premature end of connection in transaction", async () => {
-  const sql = postgres({ max_lifetime: 0.01, idle_timeout });
-  const result = await sql.begin(async (sql) => {
-    await sql`select 1`;
+  const db = postgres({ idle_timeout, max_lifetime: 0.01 });
+  const result = await db.begin(async (tx) => {
+    await tx`select 1`;
     await delay(20);
-    await sql`select 1`;
+    await tx`select 1`;
     return "yay";
   });
 
@@ -334,15 +336,15 @@ t(
   "Ensure reconnect after max_lifetime with transactions",
   { timeout: 5 },
   async () => {
-    const sql = postgres({
-      max_lifetime: 0.01,
+    const db = postgres({
       idle_timeout,
       max: 1,
+      max_lifetime: 0.01,
     });
 
-    let x = 0;
-    while (x++ < 10) {
-      await sql.begin((sql) => sql`select 1 as x`);
+    for (let x = 0; x < 10; x += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- each transaction runs after the one before
+      await db.begin((tx) => tx`select 1 as x`);
     }
 
     return [true, true];
@@ -352,62 +354,62 @@ t(
 t(
   "Ensure transactions throw if connection is closed dwhile there is no query",
   async () => {
-    const sql = postgres(options);
-    const x = await sql
+    const db = postgres(options);
+    const x = await db
       .begin(async () => {
-        setTimeout(() => sql.end({ timeout: 0 }), 10);
-        await new Promise((r) => setTimeout(r, 200));
-        return sql`select 1`;
+        setTimeout(() => db.end({ timeout: 0 }), 10);
+        await delay(200);
+        return db`select 1`;
       })
-      .catch((x) => x);
+      .catch((error) => error);
     return ["CONNECTION_CLOSED", x.code];
   }
 );
 
 t("Does not try rollback when commit errors", async () => {
   let notice = null;
-  const sql = postgres({ ...options, onnotice: (x) => (notice = x) });
-  await sql`create table test(x int constraint test_constraint unique deferrable initially deferred)`;
+  const db = postgres({ ...options, onnotice: (x) => (notice = x) });
+  await db`create table test(x int constraint test_constraint unique deferrable initially deferred)`;
 
-  await sql
-    .begin("isolation level serializable", async (sql) => {
-      await sql`insert into test values(1)`;
-      await sql`insert into test values(1)`;
+  await db
+    .begin("isolation level serializable", async (tx) => {
+      await tx`insert into test values(1)`;
+      await tx`insert into test values(1)`;
     })
-    .catch((e) => e);
+    .catch((error) => error);
 
-  return [notice, null, await sql`drop table test`];
+  return [notice, null, await db`drop table test`];
 });
 
 t("Transaction rejects when the server rolls back the commit", async () => {
-  const sql = postgres({ ...options, max: 1 });
+  const db = postgres({ ...options, max: 1 });
   let xid;
-  const result = await sql
-    .begin(async (sql) => {
-      [{ xid }] = await sql`select pg_current_xact_id()::text as xid`;
-      await sql`savepoint parent_marker`;
-      await sql
-        .savepoint(async (sql) => {
-          await sql`rollback to savepoint parent_marker`;
+  const result = await db
+    .begin(async (tx) => {
+      [{ xid }] = await tx`select pg_current_xact_id()::text as xid`;
+      await tx`savepoint parent_marker`;
+      await tx
+        .savepoint(async (inner) => {
+          await inner`rollback to savepoint parent_marker`;
           throw new Error("force");
         })
-        .catch(() => {});
+        .catch(noop);
       return "committed";
     })
     .then(
       (x) => x,
       () => "rejected"
     );
-  const [{ status }] = await sql`select pg_xact_status(${xid}::xid8) as status`;
-  return ["rejected,aborted", `${result},${status}`, await sql.end()];
+  const [{ status }] = await db`select pg_xact_status(${xid}::xid8) as status`;
+  return ["rejected,aborted", `${result},${status}`, await db.end()];
 });
 
 t("Caught error inside a transaction still rejects it", async () => {
   await sql`create table test (x int)`;
   const result = await sql
-    .begin(async (sql) => {
-      await sql`insert into test values (1)`;
-      await sql`select 1/0`.catch(() => {});
+    .begin(async (tx) => {
+      await tx`insert into test values (1)`;
+      await tx`select 1/0`.catch(noop);
       return "committed";
     })
     .then(
@@ -419,124 +421,116 @@ t("Caught error inside a transaction still rejects it", async () => {
 });
 
 t("Notify inside a transaction with max 1", async () => {
-  const sql = postgres({ ...options, max: 1 });
+  const db = postgres({ ...options, max: 1 });
   return [
     "ok",
-    await sql.begin((sql) => sql.notify("test", "x")).then(() => "ok"),
-    await sql.end(),
+    await db.begin((tx) => tx.notify("test", "x")).then(() => "ok"),
+    await db.end(),
   ];
 });
 
 t("Transaction at pipeline boundary is reserved", async () => {
-  const sql = postgres({
+  const db = postgres({
     ...options,
+    fetch_types: false,
     max: 2,
     max_pipeline: 1,
-    fetch_types: false,
   });
-  await Promise.all([sql`select 1`, sql`select 1`]);
+  await Promise.all([db`select 1`, db`select 1`]);
   const inflight = [
-    sql`select pg_sleep(0.1)`.execute(),
-    sql`select pg_sleep(0.1)`.execute(),
+    db`select pg_sleep(0.1)`.execute(),
+    db`select pg_sleep(0.1)`.execute(),
   ];
-  const x = await sql
-    .begin((sql) => sql`select 1 as x`)
+  const x = await db
+    .begin((tx) => tx`select 1 as x`)
     .then(
-      (x) => x[0].x,
-      (x) => x.code
+      (rows) => rows[0].x,
+      (error) => error.code
     );
   await Promise.all(inflight);
-  return [1, x, await sql.end()];
+  return [1, x, await db.end()];
 });
 
 t("Transaction is reserved with pipelining disabled", async () => {
-  const sql = postgres({
+  const db = postgres({
     ...options,
+    fetch_types: false,
     max: 2,
     max_pipeline: 0,
-    fetch_types: false,
   });
-  const x = await sql
-    .begin((sql) => sql`select 1 as x`)
+  const x = await db
+    .begin((tx) => tx`select 1 as x`)
     .then(
-      (x) => x[0].x,
-      (x) => x.code
+      (rows) => rows[0].x,
+      (error) => error.code
     );
-  return [1, x, await sql.end()];
+  return [1, x, await db.end()];
 });
 
 t(
   "Query issued while BEGIN is in flight does not join the transaction",
   async () => {
-    const sql = postgres({ ...options, max: 1, fetch_types: false });
-    await sql`create table test (a int)`;
-    const tx = sql
-      .begin(async (sql) => {
-        await sql`select 1`;
+    const db = postgres({ ...options, fetch_types: false, max: 1 });
+    await db`create table test (a int)`;
+    const transaction = db
+      .begin(async (tx) => {
+        await tx`select 1`;
         throw new Error("rollback");
       })
-      .catch(() => {});
-    const insert = sql`insert into test values (1)`;
-    await Promise.all([tx, insert]);
-    return [
-      1,
-      (await sql`select count(*)::int as n from test`)[0].n,
-      await sql`drop table test`,
-      await sql.end(),
-    ];
+      .catch(noop);
+    const insert = db`insert into test values (1)`;
+    await Promise.all([transaction, insert]);
+    const [{ n }] = await db`select count(*)::int as n from test`;
+    return [1, n, await db`drop table test`, await db.end()];
   }
 );
 
 t("Transaction with sequential queries works with max_pipeline 0", async () => {
-  const sql = postgres({ ...options, max: 4, max_pipeline: 0 });
+  const db = postgres({ ...options, max: 4, max_pipeline: 0 });
   return [
     "testing",
-    await sql.begin(async (sql) => {
-      await sql`select set_config('postgres_js.test', 'testing', true)`;
-      return (await sql`select current_setting('postgres_js.test') as x`)[0].x;
+    await db.begin(async (tx) => {
+      await tx`select set_config('postgres_js.test', 'testing', true)`;
+      const [{ x }] = await tx`select current_setting('postgres_js.test') as x`;
+      return x;
     }),
-    await sql.end(),
+    await db.end(),
   ];
 });
 
 t("Transaction with concurrent queries works with max_pipeline 0", async () => {
-  const sql = postgres({ ...options, max: 4, max_pipeline: 0 });
-  return [
-    "testing",
-    (
-      await sql.begin((sql) => [
-        sql`select set_config('postgres_js.test', 'testing', true)`,
-        sql`select current_setting('postgres_js.test') as x`,
-      ])
-    )[1][0].x,
-    await sql.end(),
-  ];
+  const db = postgres({ ...options, max: 4, max_pipeline: 0 });
+  const [, [{ x }]] = await db.begin((tx) => [
+    tx`select set_config('postgres_js.test', 'testing', true)`,
+    tx`select current_setting('postgres_js.test') as x`,
+  ]);
+  return ["testing", x, await db.end()];
 });
 
 t(
   "Undefined value in a transaction returning an array of queries rejects",
   async () => {
-    const sql = postgres(options);
-    await sql`create table test (x int)`;
-    const error = await sql
-      .begin((sql) => [
-        sql`insert into test values (1)`,
-        sql`select ${undefined} as x`,
+    const db = postgres(options);
+    await db`create table test (x int)`;
+    const error = await db
+      .begin((tx) => [
+        tx`insert into test values (1)`,
+        tx`select ${undefined} as x`,
       ])
-      .catch((e) => e.code);
-    const count = (await sql`select count(*)::int from test`)[0].count;
-    await sql`drop table test`;
-    await sql.end();
-    return ["UNDEFINED_VALUE,0", [error, count].join()];
+      .catch((queryError) => queryError.code);
+    const [{ count }] = await db`select count(*)::int from test`;
+    await db`drop table test`;
+    await db.end();
+    return ["UNDEFINED_VALUE,0", [error, count].join(",")];
   }
 );
 
 t(
   "Undefined value aborts a pipelined transaction on a reserved connection",
   async () => {
-    const sql = postgres(options);
-    await sql`create table test (x int)`;
-    const reserved = await sql.reserve();
+    const db = postgres(options);
+    await db`create table test (x int)`;
+    const reserved = await db.reserve();
     const results = await Promise.all(
       [
         reserved`begin`,
@@ -546,18 +540,18 @@ t(
         reserved`commit`,
       ].map((x) =>
         x.then(
-          (x) => x.command,
-          (e) => e.code
+          (result) => result.command,
+          (error) => error.code
         )
       )
     );
     reserved.release();
-    const count = (await sql`select count(*)::int from test`)[0].count;
-    await sql`drop table test`;
-    await sql.end();
+    const [{ count }] = await db`select count(*)::int from test`;
+    await db`drop table test`;
+    await db.end();
     return [
       "BEGIN,INSERT,UNDEFINED_VALUE,25P02,ROLLBACK,0",
-      [...results, count].join(),
+      [...results, count].join(","),
     ];
   }
 );
@@ -565,42 +559,42 @@ t(
 t(
   "Parameter failing to serialize aborts a pipelined transaction on a reserved connection",
   async () => {
-    const sql = postgres(options);
-    await sql`create table test (x int)`;
-    const reserved = await sql.reserve();
+    const db = postgres(options);
+    await db`create table test (x int)`;
+    const reserved = await db.reserve();
     const results = await Promise.all(
       [
         reserved`begin`,
         reserved`insert into test values (1)`,
-        reserved`select ${new Date(NaN)}::timestamptz as x`,
+        reserved`select ${new Date(Number.NaN)}::timestamptz as x`,
         reserved`insert into test values (2)`,
         reserved`commit`,
       ].map((x) =>
         x.then(
-          (x) => x.command,
-          (e) => e.code || e.name
+          (result) => result.command,
+          (error) => error.code || error.name
         )
       )
     );
     reserved.release();
-    const count = (await sql`select count(*)::int from test`)[0].count;
-    await sql`drop table test`;
-    await sql.end();
+    const [{ count }] = await db`select count(*)::int from test`;
+    await db`drop table test`;
+    await db.end();
     return [
       "BEGIN,INSERT,RangeError,25P02,ROLLBACK,0",
-      [...results, count].join(),
+      [...results, count].join(","),
     ];
   }
 );
 
 t("Does not reject leftover begin onclose after commit", async () => {
-  const sql = postgres({ ...options, max: 1 });
+  const db = postgres({ ...options, max: 1 });
   const rejections = [];
   const onUnhandled = (reason) => rejections.push(reason);
   process.on("unhandledRejection", onUnhandled);
   try {
-    await sql.begin((sql) => sql`select 1`);
-    await sql.end({ timeout: 0 });
+    await db.begin((tx) => tx`select 1`);
+    await db.end({ timeout: 0 });
     await delay(50);
   } finally {
     process.off("unhandledRejection", onUnhandled);
@@ -612,15 +606,15 @@ t(
   "idle_in_transaction_session_timeout rejects the transaction",
   { timeout: 5 },
   async () => {
-    const sql = postgres(options);
-    const error = await sql
-      .begin(async (sql) => {
-        await sql`set local idle_in_transaction_session_timeout = '1s'`;
+    const db = postgres(options);
+    const error = await db
+      .begin(async (tx) => {
+        await tx`set local idle_in_transaction_session_timeout = '1s'`;
         await delay(1500);
-        await sql`select 1`;
+        await tx`select 1`;
       })
-      .catch((e) => e);
-    await sql.end();
+      .catch((timeoutError) => timeoutError);
+    await db.end();
     return ["25P03", error.code];
   }
 );
@@ -629,21 +623,21 @@ t(
   "Transaction queries fail after its connection is gone even if the callback continues",
   { timeout: 5 },
   async () => {
-    const sql = postgres({ ...options, max: 1 });
-    setTimeout(() => sql`select 1`.catch(() => {}), 1200);
+    const db = postgres({ ...options, max: 1 });
+    setTimeout(() => db`select 1`.catch(noop), 1200);
     let code;
-    await sql
-      .begin(async (sql) => {
-        await sql`set local idle_in_transaction_session_timeout = '1s'`;
+    await db
+      .begin(async (tx) => {
+        await tx`set local idle_in_transaction_session_timeout = '1s'`;
         await delay(1500);
-        code = await sql`select 'should fail'`.then(
+        code = await tx`select 'should fail'`.then(
           () => "ran",
-          (e) => e.code
+          (error) => error.code
         );
       })
-      .catch(() => {});
+      .catch(noop);
     await delay(1000);
-    await sql.end();
+    await db.end();
     return ["CONNECTION_CLOSED", code];
   }
 );
@@ -651,126 +645,122 @@ t(
 t(
   "Disconnect rejects queued transaction queries and allows reconnect",
   async () => {
-    const sql = postgres({ ...options, max_pipeline: 1, fetch_types: false });
+    const db = postgres({ ...options, fetch_types: false, max_pipeline: 1 });
     let queries;
 
     try {
-      const error = await sql
-        .begin((sql) => {
+      const error = await db
+        .begin((tx) => {
           queries = [
-            sql`select pg_terminate_backend(pg_backend_pid())`.execute(),
-            sql`select 1`.execute(),
-            sql`select 2`.execute(),
+            tx`select pg_terminate_backend(pg_backend_pid())`.execute(),
+            tx`select 1`.execute(),
+            tx`select 2`.execute(),
           ];
           return Promise.allSettled(queries);
         })
-        .catch((x) => x);
+        .catch((beginError) => beginError);
 
       const results = await Promise.allSettled(queries);
-      const [{ x }] = await sql`select 1 as x`;
+      const [{ x }] = await db`select 1 as x`;
       return [
         "57P01,rejected,rejected,rejected,1",
-        [error.code, ...results.map((x) => x.status), x].join(","),
+        [error.code, ...results.map((result) => result.status), x].join(","),
       ];
     } finally {
-      await sql.end({ timeout: 0 });
+      await db.end({ timeout: 0 });
     }
   }
 );
 
-t("Disconnected transaction cannot query a reused connection", async () =>
-  withDisconnectedTransaction(({ sql, disconnected }) =>
-    sql.begin(async (sql) => {
-      await sql`select set_config('postgres_js.test', 'replacement', true)`;
+t("Disconnected transaction cannot query a reused connection", () =>
+  withDisconnectedTransaction(({ pool, disconnected }) =>
+    pool.begin(async (tx) => {
+      await tx`select set_config('postgres_js.test', 'replacement', true)`;
       const result =
         await disconnected`select current_setting('postgres_js.test') as x`.catch(
-          (x) => x
+          (error) => error
         );
       return ["CONNECTION_CLOSED", result.code];
     })
   )
 );
 
-t("Disconnected transaction cannot commit a reused connection", async () =>
+t("Disconnected transaction cannot commit a reused connection", () =>
   finishDisconnectedTransaction()
 );
 
-t("Disconnected transaction cannot roll back a reused connection", async () =>
+t("Disconnected transaction cannot roll back a reused connection", () =>
   finishDisconnectedTransaction(new Error("original callback failed"))
 );
 
-function finishDisconnectedTransaction(error) {
-  return withDisconnectedTransaction(({ sql, finish }) =>
-    sql.begin(async (sql) => {
-      const [{ x: before }] = await sql`select txid_current()::text as x`;
+const finishDisconnectedTransaction = (error) =>
+  withDisconnectedTransaction(({ pool, finish }) =>
+    pool.begin(async (tx) => {
+      const [{ x: before }] = await tx`select txid_current()::text as x`;
       finish(error);
-      await new Promise((resolve) => setImmediate(resolve));
-      const [{ x: after }] = await sql`select txid_current()::text as x`;
+      await immediate();
+      const [{ x: after }] = await tx`select txid_current()::text as x`;
       return [before, after];
     })
   );
-}
 
-async function withDisconnectedTransaction(fn) {
+const withDisconnectedTransaction = async (fn) => {
   const pool = postgres({ ...options, fetch_types: false });
-  let finish, ready;
-  const gate = new Promise(
-    (resolve, reject) =>
-      (finish = (error) => (error ? reject(error) : resolve()))
-  );
-  const connected = new Promise((resolve) => (ready = resolve));
+  const gate = Promise.withResolvers();
+  const finish = (error) => (error ? gate.reject(error) : gate.resolve());
+  const connected = Promise.withResolvers();
   const failed = pool
-    .begin(async (sql) => {
-      const [{ pid }] = await sql`select pg_backend_pid() as pid`;
-      ready({ disconnected: sql, pid });
-      await gate;
+    .begin(async (tx) => {
+      const [{ pid }] = await tx`select pg_backend_pid() as pid`;
+      connected.resolve({ disconnected: tx, pid });
+      await gate.promise;
     })
-    .catch((x) => x);
+    .catch((beginError) => beginError);
 
   try {
     const { disconnected, pid } = await Promise.race([
-      connected,
-      failed.then((error) => {
-        throw error;
+      connected.promise,
+      failed.then((beginError) => {
+        throw beginError;
       }),
     ]);
     await sql`select pg_terminate_backend(${pid}::int)`;
     await failed;
-    return await fn({ sql: pool, disconnected, finish });
+    return await fn({ disconnected, finish, pool });
   } finally {
     finish();
-    await new Promise((resolve) => setImmediate(resolve));
+    await immediate();
     await pool.end({ timeout: 0 });
   }
-}
+};
 
 t("Savepoint names are quoted", async () => {
   await sql`create table test (a int)`;
-  await sql.begin(async (sql) => {
-    await sql.savepoint(
+  await sql.begin(async (tx) => {
+    await tx.savepoint(
       "with space",
-      (sql) => sql`insert into test values (1)`
+      (inner) => inner`insert into test values (1)`
     );
-    await sql.savepoint(
+    await tx.savepoint(
       'a";create table test_injected (a int);--',
-      (sql) => sql`insert into test values (2)`
+      (inner) => inner`insert into test values (2)`
     );
   });
   const [{ injected }] =
     await sql`select to_regclass('test_injected') is not null as injected`;
-  return [
-    "2 false",
-    `${(await sql`select count(*)::int as n from test`)[0].n} ${injected}`,
-    await sql`drop table test`,
-  ];
+  const [{ n }] = await sql`select count(*)::int as n from test`;
+  return ["2 false", `${n} ${injected}`, await sql`drop table test`];
 });
 
 t("A prepared transaction name cannot close its quote", async () => {
   const name = "tx'; create table test_injected (a int); --";
-  await sql.begin((sql) => (sql.prepare(name), sql`select 1`));
+  await sql.begin((tx) => {
+    tx.prepare(name);
+    return tx`select 1`;
+  });
   const [{ gid }] =
     await sql`select gid from pg_prepared_xacts where gid like 'tx%'`;
-  await sql.unsafe(`rollback prepared '${gid.replace(/'/g, "''")}'`);
+  await sql.unsafe(`rollback prepared '${gid.replaceAll("'", "''")}'`);
   const [{ injected }] =
     await sql`select to_regclass('test_injected') is not null as injected`;
   return ["false", String(injected)];
@@ -779,28 +769,28 @@ t("A prepared transaction name cannot close its quote", async () => {
 t(
   "An unsafe begin is rejected and rolled back, and the queries behind it get their own answers",
   async () => {
-    const sql = postgres({ ...options, max: 2 });
-    await sql`create table test (a int)`;
+    const db = postgres({ ...options, max: 2 });
+    await db`create table test (a int)`;
     const results = await Promise.all([
-      sql`begin`.then(
+      db`begin`.then(
         (x) => x.command,
-        (e) => e.code
+        (error) => error.code
       ),
-      sql`insert into test values (1) returning a`.then(
+      db`insert into test values (1) returning a`.then(
         (x) => `${x.command}:${x[0].a}`,
-        (e) => e.code
+        (error) => error.code
       ),
-      sql`select 'third' as x`.then(
+      db`select 'third' as x`.then(
         (x) => `${x.command}:${x[0].x}`,
-        (e) => e.code
+        (error) => error.code
       ),
     ]);
-    const [{ n }] = await sql`select count(*)::int as n from test`;
+    const [{ n }] = await db`select count(*)::int as n from test`;
     return [
       "UNSAFE_TRANSACTION,INSERT:1,SELECT:third 1",
-      `${results.join()} ${n}`,
-      await sql`drop table test`,
-      await sql.end(),
+      `${results.join(",")} ${n}`,
+      await db`drop table test`,
+      await db.end(),
     ];
   }
 );
@@ -808,34 +798,34 @@ t(
 t(
   "A begin hidden behind a comment runs alone, rolls back and leaves the queries pipelined behind it alone",
   async () => {
-    const sql = postgres({ ...options, max: 2 });
-    await sql`create table test (a int)`;
-    const reserved = await sql.reserve();
+    const db = postgres({ ...options, max: 2 });
+    await db`create table test (a int)`;
+    const reserved = await db.reserve();
     const results = await Promise.all([
-      sql`/* hidden */ begin`.then(
+      db`/* hidden */ begin`.then(
         (x) => x.command,
-        (e) => e.code
+        (error) => error.code
       ),
-      sql`insert into test values (1) returning a`.then(
+      db`insert into test values (1) returning a`.then(
         (x) => x.command,
-        (e) => e.code
+        (error) => error.code
       ),
-      sql`select 'third' as x`.then(
+      db`select 'third' as x`.then(
         (x) => x.command,
-        (e) => e.code
+        (error) => error.code
       ),
     ]);
     reserved.release();
-    const [{ n }] = await sql`select count(*)::int as n from test`;
+    const [{ n }] = await db`select count(*)::int as n from test`;
     const after = await Promise.all([
-      sql`select 1 as x`,
-      sql`select 2 as x`,
-    ]).then((x) => x.map((r) => r[0].x).join());
+      db`select 1 as x`,
+      db`select 2 as x`,
+    ]).then((x) => x.map((r) => r[0].x).join(","));
     return [
       "UNSAFE_TRANSACTION,INSERT,SELECT 1 1,2",
-      `${results.join()} ${n} ${after}`,
-      await sql`drop table test`,
-      await sql.end(),
+      `${results.join(",")} ${n} ${after}`,
+      await db`drop table test`,
+      await db.end(),
     ];
   }
 );
@@ -843,39 +833,37 @@ t(
 t(
   "A begin used again runs alone again, whether tagged, unsafe, prepared or not",
   async () => {
-    const sql = postgres({ ...options, max: 2 });
-    await sql`create table test (a int)`;
+    const db = postgres({ ...options, max: 2 });
+    await db`create table test (a int)`;
     const begins = [
-      () => sql`begin`,
-      () => sql.unsafe("begin"),
-      () => sql.unsafe("begin", [], { simple: false }),
-      () => sql.unsafe("begin", [], { simple: false, prepare: true }),
+      () => db`begin`,
+      () => db.unsafe("begin"),
+      () => db.unsafe("begin", [], { simple: false }),
+      () => db.unsafe("begin", [], { prepare: true, simple: false }),
     ];
     const results = [];
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 2; i += 1) {
       for (const begin of begins) {
-        results.push(
-          (
-            await Promise.all([
-              begin().then(
-                (x) => x.command,
-                (e) => e.code
-              ),
-              sql`insert into test values (1) returning a`.then(
-                (x) => x.command,
-                (e) => e.code
-              ),
-            ])
-          ).join(":")
-        );
+        // oxlint-disable-next-line no-await-in-loop -- each begin runs after the one before
+        const commands = await Promise.all([
+          begin().then(
+            (x) => x.command,
+            (error) => error.code
+          ),
+          db`insert into test values (1) returning a`.then(
+            (x) => x.command,
+            (error) => error.code
+          ),
+        ]);
+        results.push(commands.join(":"));
       }
     }
-    const [{ n }] = await sql`select count(*)::int as n from test`;
+    const [{ n }] = await db`select count(*)::int as n from test`;
     return [
-      `${new Array(8).fill("UNSAFE_TRANSACTION:INSERT").join()} 8`,
-      `${results.join()} ${n}`,
-      await sql`drop table test`,
-      await sql.end(),
+      `${Array.from({ length: 8 }, () => "UNSAFE_TRANSACTION:INSERT").join(",")} 8`,
+      `${results.join(",")} ${n}`,
+      await db`drop table test`,
+      await db.end(),
     ];
   }
 );
@@ -883,20 +871,20 @@ t(
 t(
   "A script with its own BEGIN and COMMIT in one simple query runs on the pool",
   async () => {
-    const sql = postgres({ ...options, max: 2 });
-    await sql`create table test (a int)`;
-    const commands = await sql
+    const db = postgres({ ...options, max: 2 });
+    await db`create table test (a int)`;
+    const commands = await db
       .unsafe("begin; insert into test values (1); commit;")
-      .then((x) => x.map((r) => r.command).join());
-    const after = await sql
+      .then((x) => x.map((r) => r.command).join(","));
+    const after = await db
       .unsafe("select 1; begin; insert into test values (2); commit")
-      .then((x) => x.map((r) => r.command).join());
-    const [{ n }] = await sql`select count(*)::int as n from test`;
+      .then((x) => x.map((r) => r.command).join(","));
+    const [{ n }] = await db`select count(*)::int as n from test`;
     return [
       "BEGIN,INSERT,COMMIT SELECT,BEGIN,INSERT,COMMIT 2",
       `${commands} ${after} ${n}`,
-      await sql`drop table test`,
-      await sql.end(),
+      await db`drop table test`,
+      await db.end(),
     ];
   }
 );
@@ -904,16 +892,17 @@ t(
 t(
   "A query that leaves a transaction open on the pool is rejected and rolled back",
   async () => {
-    const sql = postgres({ ...options, max: 2 });
-    await sql`create table test (a int)`;
-    const opened = await sql.unsafe("select 1; start transaction").then(
+    const db = postgres({ ...options, max: 2 });
+    await db`create table test (a int)`;
+    const opened = await db.unsafe("select 1; start transaction").then(
       () => "ok",
-      (e) => e.code
+      (error) => error.code
     );
-    for (let i = 0; i < 4; i++) {
-      await sql`insert into test values (${i})`;
+    for (let i = 0; i < 4; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- each insert runs after the one before
+      await db`insert into test values (${i})`;
     }
-    await sql.end();
+    await db.end();
     const check = postgres(options);
     const [{ n }] = await check`select count(*)::int as n from test`;
     return [
@@ -928,33 +917,35 @@ t(
 t(
   "A query issued before sql.begin runs before the transaction with max: 1",
   async () => {
-    const sql = postgres({ ...options, max: 1 });
-    await sql`create table test (a int)`;
-    const first = sql`select count(*)::int as n from test`.execute();
-    const tx = sql.begin((sql) => sql`insert into test values (1)`);
+    const db = postgres({ ...options, max: 1 });
+    await db`create table test (a int)`;
+    const first = db`select count(*)::int as n from test`.execute();
+    const transaction = db.begin((tx) => tx`insert into test values (1)`);
     const [{ n }] = await first;
-    await tx;
-    return [0, n, await sql`drop table test`, await sql.end()];
+    await transaction;
+    return [0, n, await db`drop table test`, await db.end()];
   }
 );
 
 t(
   "A caught query that cannot be built aborts a transaction opened by hand on a reserved connection",
   async () => {
-    const sql = postgres(options);
-    await sql`create table test (a int)`;
-    const reserved = await sql.reserve();
+    const db = postgres(options);
+    await db`create table test (a int)`;
+    const reserved = await db.reserve();
     await reserved`begin`;
     await reserved`insert into test values (1)`;
-    const bad = await reserved`select ${undefined} as x`.catch((e) => e.code);
+    const bad = await reserved`select ${undefined} as x`.catch(
+      (error) => error.code
+    );
     const commit = await reserved`commit`;
     reserved.release();
-    const [{ n }] = await sql`select count(*)::int as n from test`;
+    const [{ n }] = await db`select count(*)::int as n from test`;
     return [
       "UNDEFINED_VALUE ROLLBACK 0",
       `${bad} ${commit.command} ${n}`,
-      await sql`drop table test`,
-      await sql.end(),
+      await db`drop table test`,
+      await db.end(),
     ];
   }
 );
@@ -962,27 +953,29 @@ t(
 t(
   "A query that cannot be built on a reserved connection outside a transaction leaves the connection usable",
   async () => {
-    const sql = postgres(options);
-    const reserved = await sql.reserve();
-    const bad = await reserved`select ${undefined} as x`.catch((e) => e.code);
+    const db = postgres(options);
+    const reserved = await db.reserve();
+    const bad = await reserved`select ${undefined} as x`.catch(
+      (error) => error.code
+    );
     const [{ x }] = await reserved`select 1 as x`;
     reserved.release();
-    return ["UNDEFINED_VALUE 1", `${bad} ${x}`, await sql.end()];
+    return ["UNDEFINED_VALUE 1", `${bad} ${x}`, await db.end()];
   }
 );
 
 t("sql.begin inside a transaction runs in a savepoint", async () => {
   await sql`create table test (x int)`;
-  const result = await sql.begin(async (sql) => {
-    await sql`insert into test values (1)`;
-    await sql.begin((sql) => sql`insert into test values (2)`);
-    await sql
-      .begin(async (sql) => {
-        await sql`insert into test values (3)`;
+  const result = await sql.begin(async (tx) => {
+    await tx`insert into test values (1)`;
+    await tx.begin((inner) => inner`insert into test values (2)`);
+    await tx
+      .begin(async (inner) => {
+        await inner`insert into test values (3)`;
         throw new Error("undo 3");
       })
-      .catch(() => {});
-    return sql`select array_agg(x order by x)::text as xs from test`;
+      .catch(noop);
+    return tx`select array_agg(x order by x)::text as xs from test`;
   });
   return ["{1,2}", result[0].xs, await sql`drop table test`];
 });
@@ -990,38 +983,40 @@ t("sql.begin inside a transaction runs in a savepoint", async () => {
 t(
   "A nested sql.begin with a different mode throws, the same mode is allowed",
   async () => {
-    const codes = await sql.begin("read write", async (sql) => [
-      await sql
-        .begin("read only", (sql) => sql`select 1`)
+    const codes = await sql.begin("read write", async (tx) => [
+      await tx
+        .begin("read only", (inner) => inner`select 1`)
         .then(
           () => "ran",
-          (e) => e.code
+          (error) => error.code
         ),
-      await sql
-        .begin("READ  write", (sql) => sql`select 1`)
+      await tx
+        .begin("READ  write", (inner) => inner`select 1`)
         .then(
           () => "ran",
-          (e) => e.code
+          (error) => error.code
         ),
     ]);
-    return ["NESTED_TRANSACTION_MODE,ran", codes.join()];
+    return ["NESTED_TRANSACTION_MODE,ran", codes.join(",")];
   }
 );
 
 t("A nested sql.begin can not be prepared", async () => {
-  const code = await sql.begin(async (sql) =>
-    sql
-      .begin(async (sql) => sql.prepare("x"))
+  // oxlint-disable-next-line require-await -- the transaction is given a promise, as before
+  const code = await sql.begin(async (tx) =>
+    tx
+      // oxlint-disable-next-line require-await -- the throw becomes a rejection here, as before
+      .begin(async (inner) => inner.prepare("x"))
       .then(
         () => "ran",
-        (e) => e.code
+        (error) => error.code
       )
   );
   return ["NESTED_TRANSACTION_MODE", code];
 });
 
 t("A tagged savepoint runs its query in a savepoint", async () => {
-  const [x] = await sql.begin((sql) => sql.savepoint`select 1 as x`);
+  const [x] = await sql.begin((tx) => tx.savepoint`select 1 as x`);
   return [1, x.x];
 });
 
@@ -1029,38 +1024,41 @@ t(
   "Queries in a Promise.all inside a transaction are pipelined in the order they were made (#951)",
   { timeout: 10 },
   async () => {
-    const net = await import("node:net"),
-      proxy = net.createServer((client) => {
-        const server = net.connect(5432, "127.0.0.1");
-        client.on("data", (x) => setTimeout(() => server.write(x), 50));
-        server.on("data", (x) => setTimeout(() => client.write(x), 50));
-        client.on("close", () => server.destroy());
-        server.on("close", () => client.destroy());
-        client.on("error", () => {});
-        server.on("error", () => {});
-      });
-    await new Promise((r) => proxy.listen(0, "127.0.0.1", r));
-    const sql = postgres({
-      ...options,
-      host: "127.0.0.1",
-      port: proxy.address().port,
-      max: 1,
-      fetch_types: false,
+    const nodeNet = await import("node:net");
+    const proxy = nodeNet.createServer((client) => {
+      const server = nodeNet.connect(5432, "127.0.0.1");
+      client.on("data", (x) => setTimeout(() => server.write(x), 50));
+      server.on("data", (x) => setTimeout(() => client.write(x), 50));
+      client.on("close", () => server.destroy());
+      server.on("close", () => client.destroy());
+      client.on("error", noop);
+      server.on("error", noop);
     });
-    const result = await sql.begin(async (sql) => {
-      await sql`create table test (x int)`;
+    const listening = Promise.withResolvers();
+    proxy.listen(0, "127.0.0.1", listening.resolve);
+    await listening.promise;
+    const db = postgres({
+      ...options,
+      fetch_types: false,
+      host: "127.0.0.1",
+      max: 1,
+      port: proxy.address().port,
+    });
+    const result = await db.begin(async (tx) => {
+      await tx`create table test (x int)`;
       let start = Date.now();
-      for (let i = 0; i < 5; i++) {
-        await sql`select ${i}::int`;
+      for (let i = 0; i < 5; i += 1) {
+        // oxlint-disable-next-line no-await-in-loop -- these run one after another, to time them against the pipelined ones
+        await tx`select ${i}::int`;
       }
       const sequential = Date.now() - start;
       start = Date.now();
       const [, counted, , summed] = await Promise.all([
-        sql`insert into test values (1)`,
-        sql`select count(*)::int as n from test`,
-        sql`insert into test values (2)`,
-        sql`select sum(x)::int as n from test`,
-        sql`select 1`,
+        tx`insert into test values (1)`,
+        tx`select count(*)::int as n from test`,
+        tx`insert into test values (2)`,
+        tx`select sum(x)::int as n from test`,
+        tx`select 1`,
       ]);
       return [
         Date.now() - start < sequential / 2,
@@ -1068,7 +1066,7 @@ t(
         summed[0].n,
       ].join(" ");
     });
-    await sql.end();
+    await db.end();
     proxy.close();
     return ["true 1 3", result];
   }
@@ -1078,9 +1076,9 @@ t(
   "sql.rollback() rolls back without throwing, and begin resolves with the result (#500)",
   async () => {
     await sql`create table test (x int)`;
-    const result = await sql.begin(async (sql) => {
-      await sql`insert into test values (1)`;
-      await sql.rollback();
+    const result = await sql.begin(async (tx) => {
+      await tx`insert into test values (1)`;
+      await tx.rollback();
       return "value";
     });
     const [{ n }] = await sql`select count(*)::int as n from test`;
@@ -1092,15 +1090,17 @@ t(
   "sql.rollback() in a savepoint or nested begin rolls back only that, and the outer transaction commits",
   async () => {
     await sql`create table test (x int)`;
-    await sql.begin(async (sql) => {
-      await sql`insert into test values (1)`;
-      await sql.savepoint(
-        async (sql) => (await sql`insert into test values (2)`, sql.rollback())
-      );
-      await sql.begin(
-        async (sql) => (await sql`insert into test values (3)`, sql.rollback())
-      );
-      await sql`insert into test values (4)`;
+    await sql.begin(async (tx) => {
+      await tx`insert into test values (1)`;
+      await tx.savepoint(async (inner) => {
+        await inner`insert into test values (2)`;
+        return inner.rollback();
+      });
+      await tx.begin(async (inner) => {
+        await inner`insert into test values (3)`;
+        return inner.rollback();
+      });
+      await tx`insert into test values (4)`;
     });
     const [{ xs }] =
       await sql`select string_agg(x::text, ',' order by x) as xs from test`;
@@ -1114,21 +1114,24 @@ t(
     await sql`create table test (x int)`;
     const codes = [];
     const outcome = await sql
-      .begin(async (sql) => {
-        await sql.rollback();
-        codes.push(await sql`insert into test values (1)`.catch((e) => e.code));
-        codes.push(
-          await sql.savepoint((sql) => sql`select 1`).catch((e) => e.code)
+      .begin(async (tx) => {
+        await tx.rollback();
+        const inserted = await tx`insert into test values (1)`.catch(
+          (error) => error.code
         );
-        codes.push(
-          await sql.begin((sql) => sql`select 1`).catch((e) => e.code)
-        );
+        const savepointed = await tx
+          .savepoint((inner) => inner`select 1`)
+          .catch((error) => error.code);
+        const nested = await tx
+          .begin((inner) => inner`select 1`)
+          .catch((error) => error.code);
+        codes.push(inserted, savepointed, nested);
       })
-      .catch((e) => e.code);
+      .catch((error) => error.code);
     const [{ n }] = await sql`select count(*)::int as n from test`;
     return [
       "TRANSACTION_ROLLED_BACK,TRANSACTION_ROLLED_BACK,TRANSACTION_ROLLED_BACK TRANSACTION_ROLLED_BACK 0",
-      `${codes.join()} ${outcome} ${n}`,
+      `${codes.join(",")} ${outcome} ${n}`,
       await sql`drop table test`,
     ];
   }
@@ -1137,23 +1140,23 @@ t(
 t(
   "sql.rollback() comes after the queries already made, and the connection is left idle",
   async () => {
-    const sql = postgres({ ...options, max: 1 });
-    await sql`create table test (x int)`;
+    const db = postgres({ ...options, max: 1 });
+    await db`create table test (x int)`;
     let same;
-    await sql.begin((sql) => {
-      sql`insert into test values (1)`;
-      const a = sql.rollback();
-      same = a === sql.rollback();
+    await db.begin((tx) => {
+      void tx`insert into test values (1)`;
+      const a = tx.rollback();
+      same = a === tx.rollback();
       return a;
     });
-    const [{ n }] = await sql`select count(*)::int as n from test`,
-      [{ status }] =
-        await sql`select state as status from pg_stat_activity where pid = pg_backend_pid()`;
+    const [{ n }] = await db`select count(*)::int as n from test`;
+    const [{ status }] =
+      await db`select state as status from pg_stat_activity where pid = pg_backend_pid()`;
     return [
       "true 0 active",
       `${same} ${n} ${status}`,
-      await sql`drop table test`,
-      await sql.end(),
+      await db`drop table test`,
+      await db.end(),
     ];
   }
 );
@@ -1169,11 +1172,11 @@ t(
 
     const timed = postgres({ ...options, max: 1 });
     const error = await timed
-      .begin(async (sql) => {
-        await sql`select set_config('transaction_timeout', '200', true)`;
-        await sql`select pg_sleep(2)`;
+      .begin(async (tx) => {
+        await tx`select set_config('transaction_timeout', '200', true)`;
+        await tx`select pg_sleep(2)`;
       })
-      .catch((e) => e);
+      .catch((timeoutError) => timeoutError);
     return [
       "25P04 FATAL",
       `${error.code} ${error.severity}`,
@@ -1185,28 +1188,31 @@ t(
 t(
   "A transaction whose backend is terminated mid-query rejects with the FATAL error (#1283)",
   async () => {
-    const sql = postgres({ ...options, max: 1 }),
-      killer = postgres({ ...options, max: 1 });
-    const error = await sql
-      .begin(async (sql) => {
-        const [{ pid }] = await sql`select pg_backend_pid() as pid`;
-        const query = sql`select pg_sleep(2)`.execute();
-        while (
-          !(
-            await killer`select wait_event = 'PgSleep' as sleeping from pg_stat_activity where pid = ${pid}`
-          )[0].sleeping
-        ) {
+    const db = postgres({ ...options, max: 1 });
+    const killer = postgres({ ...options, max: 1 });
+    const error = await db
+      .begin(async (tx) => {
+        const [{ pid }] = await tx`select pg_backend_pid() as pid`;
+        const query = tx`select pg_sleep(2)`.execute();
+        for (;;) {
+          const [{ sleeping }] =
+            // oxlint-disable-next-line no-await-in-loop -- polls until the query sleeps
+            await killer`select wait_event = 'PgSleep' as sleeping from pg_stat_activity where pid = ${pid}`;
+          if (sleeping) {
+            break;
+          }
+          // oxlint-disable-next-line no-await-in-loop -- polls until the query sleeps
           await delay(1);
         }
         await killer`select pg_terminate_backend(${pid})`;
         await query;
       })
-      .catch((e) => e);
+      .catch((beginError) => beginError);
     return [
       "57P01 FATAL",
       `${error.code} ${error.severity}`,
       await killer.end(),
-      await sql.end(),
+      await db.end(),
     ];
   }
 );
@@ -1214,19 +1220,18 @@ t(
 t(
   "A transaction terminated between statements rejects with the FATAL error, and its next query has it as cause (#1283)",
   async () => {
-    const sql = postgres({ ...options, max: 1 }),
-      killer = postgres({ ...options, max: 1 });
-    let settled;
-    const next = new Promise((r) => (settled = r));
-    const error = await sql
-      .begin(async (sql) => {
-        const [{ pid }] = await sql`select pg_backend_pid() as pid`;
+    const db = postgres({ ...options, max: 1 });
+    const killer = postgres({ ...options, max: 1 });
+    const next = Promise.withResolvers();
+    const error = await db
+      .begin(async (tx) => {
+        const [{ pid }] = await tx`select pg_backend_pid() as pid`;
         await killer`select pg_terminate_backend(${pid})`;
         await delay(100);
-        settled(await sql`select 1`.catch((e) => e));
+        next.resolve(await tx`select 1`.catch((queryError) => queryError));
       })
-      .catch((e) => e);
-    const later = await next;
+      .catch((beginError) => beginError);
+    const later = await next.promise;
     return [
       "57P01 FATAL CONNECTION_CLOSED 57P01",
       [
@@ -1236,7 +1241,7 @@ t(
         later.cause && later.cause.code,
       ].join(" "),
       await killer.end(),
-      await sql.end(),
+      await db.end(),
     ];
   }
 );
@@ -1245,23 +1250,23 @@ t(
   "A FATAL in answer to COMMIT rejects with CONNECTION_CLOSED, with the FATAL as cause",
   { timeout: 10 },
   async () => {
-    const sql = postgres({ ...options, max: 1 });
-    await sql`create table test (id int)`;
-    await sql`
+    const db = postgres({ ...options, max: 1 });
+    await db`create table test (id int)`;
+    await db`
     create function test_kill() returns trigger language plpgsql
     as $$ begin perform pg_terminate_backend(pg_backend_pid()); return null; end $$
   `;
-    await sql`create constraint trigger test_kill after insert on test deferrable initially deferred for each row execute function test_kill()`;
-    const error = await sql
-      .begin((sql) => sql`insert into test values (1)`)
-      .catch((e) => e);
-    const [{ n }] = await sql`select count(*)::int as n from test`;
+    await db`create constraint trigger test_kill after insert on test deferrable initially deferred for each row execute function test_kill()`;
+    const error = await db
+      .begin((tx) => tx`insert into test values (1)`)
+      .catch((commitError) => commitError);
+    const [{ n }] = await db`select count(*)::int as n from test`;
     return [
       "CONNECTION_CLOSED 57P01 0",
       [error.code, error.cause && error.cause.code, n].join(" "),
-      await sql`drop table test`,
-      await sql`drop function test_kill`,
-      await sql.end(),
+      await db`drop table test`,
+      await db`drop function test_kill`,
+      await db.end(),
     ];
   }
 );
@@ -1272,74 +1277,86 @@ t(
   async () => {
     const outcomes = [];
     for (const method of ["savepoint", "begin"]) {
-      const sql = postgres({ ...options, max: 1 }),
-        killer = postgres({ ...options, max: 1 });
-      let started, release, settled;
-      const pid = new Promise((r) => (started = r)),
-        gate = new Promise((r) => (release = r)),
-        child = new Promise((r) => (settled = r));
-      const root = sql
-        .begin((sql) =>
-          sql[method](async (sql) => {
-            const [x] = await sql`select pg_backend_pid() as pid`;
-            started(x.pid);
-            await gate;
+      const db = postgres({ ...options, max: 1 });
+      const killer = postgres({ ...options, max: 1 });
+      const pid = Promise.withResolvers();
+      const gate = Promise.withResolvers();
+      const child = Promise.withResolvers();
+      const root = db
+        .begin((tx) =>
+          tx[method](async (inner) => {
+            const [x] = await inner`select pg_backend_pid() as pid`;
+            pid.resolve(x.pid);
+            await gate.promise;
             return "child";
           })
             .then(
               () => "fulfilled",
-              (e) => e.code
+              (childError) => childError.code
             )
-            .then((x) => (settled(x), x))
+            .then((x) => {
+              child.resolve(x);
+              return x;
+            })
         )
-        .catch((e) => e.code);
-      await killer`select pg_terminate_backend(${await pid})`;
+        .catch((beginError) => beginError.code);
+      // oxlint-disable-next-line no-await-in-loop -- the methods are tried one after the other
+      await killer`select pg_terminate_backend(${await pid.promise})`;
+      // oxlint-disable-next-line no-await-in-loop -- the methods are tried one after the other
       const outer = await root;
-      release();
-      outcomes.push(`${outer} ${await child}`);
+      gate.resolve();
+      // oxlint-disable-next-line no-await-in-loop -- the methods are tried one after the other
+      outcomes.push(`${outer} ${await child.promise}`);
+      // oxlint-disable-next-line no-await-in-loop -- the methods are tried one after the other
       await killer.end();
-      await sql.end();
+      // oxlint-disable-next-line no-await-in-loop -- the methods are tried one after the other
+      await db.end();
     }
-    return ["57P01 57P01,57P01 57P01", outcomes.join()];
+    return ["57P01 57P01,57P01 57P01", outcomes.join(",")];
   }
 );
 
-async function writes(fn) {
+const writes = async (fn) => {
   let count = 0;
   const server = net.createServer((client) => {
     const upstream = net.connect(
       options.port || 5432,
       options.host || "localhost"
     );
-    client.on("data", (x) => (count++, upstream.write(x)));
+    client.on("data", (x) => {
+      count += 1;
+      upstream.write(x);
+    });
     upstream.on("data", (x) => client.write(x));
     client.on("close", () => upstream.destroy());
     upstream.on("close", () => client.destroy());
     client.on("error", () => upstream.destroy());
     upstream.on("error", () => client.destroy());
   });
-  await new Promise((r) => server.listen(0, "localhost", r));
-  const sql = postgres({
+  const listening = Promise.withResolvers();
+  server.listen(0, "localhost", listening.resolve);
+  await listening.promise;
+  const db = postgres({
     ...options,
     host: "localhost",
-    port: server.address().port,
     max: 1,
+    port: server.address().port,
   });
-  await sql`select ${1}::int as x`;
+  await db`select ${1}::int as x`;
   try {
     count = 0;
-    const result = await fn(sql);
+    const result = await fn(db);
     return `${count} ${result}`;
   } finally {
-    await sql.end();
+    await db.end();
     server.close();
   }
-}
+};
 
 t("begin waits for BEGIN before the first statement", async () => [
   "3 1",
-  await writes((sql) =>
-    sql.begin((sql) => sql`select ${1}::int as x`).then(([x]) => x.x)
+  await writes((db) =>
+    db.begin((tx) => tx`select ${1}::int as x`).then(([x]) => x.x)
   ),
 ]);
 
@@ -1347,9 +1364,9 @@ t(
   "begin with a transaction mode waits for BEGIN before the first statement",
   async () => [
     "3 1",
-    await writes((sql) =>
-      sql
-        .begin("read write", (sql) => sql`select ${1}::int as x`)
+    await writes((db) =>
+      db
+        .begin("read write", (tx) => tx`select ${1}::int as x`)
         .then(([x]) => x.x)
     ),
   ]
@@ -1362,9 +1379,9 @@ t(
     const error = await sql
       .begin(
         "isolation level nonsense",
-        (sql) => sql`insert into test values (1)`
+        (tx) => tx`insert into test values (1)`
       )
-      .catch((e) => e.code);
+      .catch((beginError) => beginError.code);
     const [{ n }] = await sql`select count(*)::int as n from test`;
     return ["42601 0", `${error} ${n}`, await sql`drop table test`];
   }
@@ -1375,34 +1392,41 @@ t(
   { timeout: 30 },
   async () => {
     const victim = postgres({
-        ...options,
-        max: 1,
-        connection: { application_name: "begin_cancel" },
-      }),
-      other = postgres({ ...options, max: 1 });
+      ...options,
+      connection: { application_name: "begin_cancel" },
+      max: 1,
+    });
+    const other = postgres({ ...options, max: 1 });
     await other`create table test (i int)`;
     const spraying = { on: true };
     const spray = (async () => {
       while (spraying.on) {
+        // oxlint-disable-next-line no-await-in-loop -- cancels again and again until told to stop
         await other`select pg_cancel_backend(pid) from pg_stat_activity where application_name = 'begin_cancel'`;
       }
     })();
-    let wrong = 0,
-      canceled = 0;
-    for (let i = 0; i < 500; i++) {
+    let wrong = 0;
+    let canceled = 0;
+    for (let i = 0; i < 500; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- each transaction runs after the one before
       const failed = await victim
-        .begin(async (sql) => {
-          await sql`insert into test values (${i})`;
-          await sql`insert into test values (${i})`;
+        .begin(async (tx) => {
+          await tx`insert into test values (${i})`;
+          await tx`insert into test values (${i})`;
         })
         .then(
           () => false,
-          (e) => e.code === "57014" || Promise.reject(e)
+          (error) => error.code === "57014" || Promise.reject(error)
         );
       const [{ n }] =
+        // oxlint-disable-next-line no-await-in-loop -- checks each transaction before the next
         await other`select count(*)::int as n from test where i = ${i}`;
-      failed && canceled++;
-      (failed ? n !== 0 : n !== 2) && wrong++;
+      if (failed) {
+        canceled += 1;
+      }
+      if (failed ? n !== 0 : n !== 2) {
+        wrong += 1;
+      }
     }
     spraying.on = false;
     await spray;

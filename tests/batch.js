@@ -3,8 +3,10 @@ import net from "node:net";
 import { postgres, sql, options, delay } from "./setup.js";
 import { t } from "./test.js";
 
-const count = async (sql) =>
-  (await sql`select count(*)::int as n from test`)[0].n;
+const count = async (db) => {
+  const [{ n }] = await db`select count(*)::int as n from test`;
+  return n;
+};
 
 t("sql.batch gives the results of its queries in order", async () => {
   await sql`create table test (id int primary key, v text)`;
@@ -18,7 +20,7 @@ t("sql.batch gives the results of its queries in order", async () => {
     [
       `${a.command} ${a.count}`,
       `${b.command} ${b[0].v}`,
-      `${c.command} ${c.map((x) => x.v).join()}`,
+      `${c.command} ${c.map((x) => x.v).join(",")}`,
     ].join(" | "),
     await sql`drop table test`,
   ];
@@ -37,7 +39,7 @@ t("sql.batch commits nothing when one of its queries fails", async () => {
       sql`insert into test values (${1})`,
       sql`insert into test values (${2})`,
     ])
-    .catch((e) => e);
+    .catch((batchError) => batchError);
   return [
     "23505 1 0",
     `${error.code} ${error.index} ${await count(sql)}`,
@@ -56,7 +58,9 @@ t(
     ];
     await sql.batch(queries).catch(() => null);
     const errors = await Promise.all(
-      queries.map((q) => q.catch((e) => [e.code, e.index, !!e.skipped].join()))
+      queries.map((q) =>
+        q.catch((error) => [error.code, error.index, !!error.skipped].join(","))
+      )
     );
     return [
       "23505,1,true 23505,1,false 23505,1,true",
@@ -75,7 +79,7 @@ t(
         sql`insert into test values (${1})`,
         sql`select ${undefined} as x`,
       ])
-      .catch((e) => e);
+      .catch((batchError) => batchError);
     return [
       "UNDEFINED_VALUE 1 0",
       `${error.code} ${error.index} ${await count(sql)}`,
@@ -87,37 +91,34 @@ t(
 t(
   "sql.batch rolls back the queries before one whose value cannot be written",
   async () => {
-    const sql = postgres({
+    const db = postgres({
       ...options,
       max: 1,
       types: {
         bad: {
-          to: 25,
           from: [],
           serialize: (x) => {
             throw new Error(`no ${x}`);
           },
+          to: 25,
         },
       },
     });
-    await sql`create table test (id int, v text)`;
-    const error = await sql
+    await db`create table test (id int, v text)`;
+    const error = await db
       .batch([
-        sql`insert into test (id) values (${1})`,
-        sql`insert into test values (${2}, ${sql.typed("x", 25)})`,
-        sql`insert into test (id) values (${3})`,
+        db`insert into test (id) values (${1})`,
+        db`insert into test values (${2}, ${db.typed("x", 25)})`,
+        db`insert into test (id) values (${3})`,
       ])
-      .catch((e) => e);
+      .catch((batchError) => batchError);
+    const counted = await count(db);
+    const [{ x }] = await db`select 1 as x`;
     return [
       "no x 1 0 1",
-      [
-        error.message,
-        error.index,
-        await count(sql),
-        (await sql`select 1 as x`)[0].x,
-      ].join(" "),
-      await sql`drop table test`,
-      await sql.end(),
+      [error.message, error.index, counted, x].join(" "),
+      await db`drop table test`,
+      await db.end(),
     ];
   }
 );
@@ -127,7 +128,7 @@ t(
   async () => {
     const error = await sql
       .batch([sql`select ${1}::int as x`, sql`selec ${1}`, sql`select 2 as x`])
-      .catch((e) => e);
+      .catch((batchError) => batchError);
     const [[a], [b]] = await sql.batch([
       sql`select ${1}::int as x`,
       sql`select 2 as x`,
@@ -139,18 +140,18 @@ t(
 t("sql.batch in a transaction runs in that transaction", async () => {
   await sql`create table test (id int)`;
   const error = await sql
-    .begin(async (sql) => {
-      await sql.batch([
-        sql`insert into test values (${1})`,
-        sql`insert into test values (${2})`,
+    .begin(async (tx) => {
+      await tx.batch([
+        tx`insert into test values (${1})`,
+        tx`insert into test values (${2})`,
       ]);
-      await sql`insert into test values (${"x"}::int)`;
+      await tx`insert into test values (${"x"}::int)`;
     })
-    .catch((e) => e.code);
-  const [a, b] = await sql.begin((sql) =>
-    sql.batch([
-      sql`insert into test values (${3})`,
-      sql`select count(*)::int as n from test`,
+    .catch((beginError) => beginError.code);
+  const [a, b] = await sql.begin((tx) =>
+    tx.batch([
+      tx`insert into test values (${3})`,
+      tx`select count(*)::int as n from test`,
     ])
   );
   return [
@@ -173,20 +174,20 @@ t("sql.batch on a reserved connection", async () => {
 t(
   "Queries pipelined around a batch on the same connection keep their own results and errors",
   async () => {
-    const sql = postgres({ ...options, max: 1 });
-    const before = sql`select ${"before"}::text as x`,
-      failing = sql.batch([
-        sql`select ${1}::int as x`,
-        sql`select 1/${0}::int as x`,
-      ]),
-      after = sql`select ${"after"}::text as x`,
-      ok = sql.batch([
-        sql`select ${"a"}::text as x`,
-        sql`select ${"b"}::text as x`,
-      ]);
+    const db = postgres({ ...options, max: 1 });
+    const before = db`select ${"before"}::text as x`;
+    const failing = db.batch([
+      db`select ${1}::int as x`,
+      db`select 1/${0}::int as x`,
+    ]);
+    const after = db`select ${"after"}::text as x`;
+    const ok = db.batch([
+      db`select ${"a"}::text as x`,
+      db`select ${"b"}::text as x`,
+    ]);
     const results = await Promise.all([
       before,
-      failing.catch((e) => `${e.code} ${e.index}`),
+      failing.catch((error) => `${error.code} ${error.index}`),
       after,
       ok,
     ]);
@@ -196,9 +197,9 @@ t(
         results[0][0].x,
         results[1],
         results[2][0].x,
-        results[3].map((r) => r[0].x).join(),
+        results[3].map((r) => r[0].x).join(","),
       ].join(" "),
-      await sql.end(),
+      await db.end(),
     ];
   }
 );
@@ -206,17 +207,19 @@ t(
 t(
   "sql.batch sends its queries with one Sync in one write once prepared",
   async () => {
-    let writes = 0,
-      syncs = 0;
+    let writes = 0;
+    let syncs = 0;
     const server = net.createServer((client) => {
       const upstream = net.connect(
         options.port || 5432,
         options.host || "localhost"
       );
       client.on("data", (x) => {
-        writes++;
+        writes += 1;
         for (let i = 0; i < x.length; i += 1 + x.readInt32BE(i + 1)) {
-          x[i] === 83 && syncs++;
+          if (x[i] === 83) {
+            syncs += 1;
+          }
         }
         upstream.write(x);
       });
@@ -224,24 +227,27 @@ t(
       client.on("close", () => upstream.destroy());
       upstream.on("close", () => client.destroy());
     });
-    await new Promise((r) => server.listen(0, "localhost", r));
-    const sql = postgres({
+    const listening = Promise.withResolvers();
+    server.listen(0, "localhost", listening.resolve);
+    await listening.promise;
+    const db = postgres({
       ...options,
       host: "localhost",
-      port: server.address().port,
       max: 1,
+      port: server.address().port,
     });
     const run = () =>
-      sql.batch([
-        sql`select ${1}::int as x`,
-        sql`select ${2}::int as y`,
-        sql`select ${3}::int as z`,
+      db.batch([
+        db`select ${1}::int as x`,
+        db`select ${2}::int as y`,
+        db`select ${3}::int as z`,
       ]);
     await run();
-    writes = syncs = 0;
+    writes = 0;
+    syncs = 0;
     const [[a], [b], [c]] = await run();
     const counted = [writes, syncs];
-    await sql.end();
+    await db.end();
     server.close();
     return ["1 1 1 2 3", [...counted, a.x, b.y, c.z].join(" ")];
   }
@@ -256,30 +262,24 @@ t(
     for (const x of ["select 1", [1], [ran]]) {
       try {
         sql.batch(x);
-      } catch (e) {
-        errors.push(e.code);
+      } catch (error) {
+        errors.push(error.code);
       }
     }
-    return ["BATCH_NOT_ARRAY,BATCH_NOT_QUERY,BATCH_EXECUTED", errors.join()];
+    return ["BATCH_NOT_ARRAY,BATCH_NOT_QUERY,BATCH_EXECUTED", errors.join(",")];
   }
 );
 
 t(
   "Cancelling a batch rejects it and leaves the connection usable",
   async () => {
-    const sql = postgres({ ...options, max: 1 });
-    const batch = sql.batch([
-      sql`select pg_sleep(1)`,
-      sql`select ${1}::int as x`,
-    ]);
-    const rejected = batch.catch((e) => e.code);
+    const db = postgres({ ...options, max: 1 });
+    const batch = db.batch([db`select pg_sleep(1)`, db`select ${1}::int as x`]);
+    const rejected = batch.catch((cancelError) => cancelError.code);
     await delay(100);
     await batch.cancel();
     const code = await rejected;
-    return [
-      "57014 1",
-      `${code} ${(await sql`select 1 as x`)[0].x}`,
-      await sql.end(),
-    ];
+    const [{ x }] = await db`select 1 as x`;
+    return ["57014 1", `${code} ${x}`, await db.end()];
   }
 );

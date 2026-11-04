@@ -1,17 +1,21 @@
 import { postgres, sql, options, delay, rel } from "./setup.js";
 import { t } from "./test.js";
 
-t("Escapes", async () => [
-  'hej"hej',
-  Object.keys((await sql`select 1 as ${sql('hej"hej')}`)[0])[0],
-]);
+t("Escapes", async () => {
+  const [row] = await sql`select 1 as ${sql('hej"hej')}`;
+  return ['hej"hej', Object.keys(row)[0]];
+});
 
-t("sql file", async () => [1, (await sql.file(rel("select.sql")))[0].x]);
+t("sql file", async () => {
+  const [row] = await sql.file(rel("select.sql"));
+  return [1, row.x];
+});
 
 t("sql file has forEach", async () => {
   let result;
   await sql
     .file(rel("select.sql"), { cache: false })
+    // oxlint-disable-next-line unicorn/no-array-for-each -- the query's own forEach is what this tests
     .forEach(({ x }) => (result = x));
 
   return [1, result];
@@ -21,7 +25,8 @@ t("sql file cached", async () => {
   await sql.file(rel("select.sql"));
   await delay(20);
 
-  return [1, (await sql.file(rel("select.sql")))[0].x];
+  const [row] = await sql.file(rel("select.sql"));
+  return [1, row.x];
 });
 
 t("Parameters in file", async () => {
@@ -31,41 +36,39 @@ t("Parameters in file", async () => {
 
 t("unsafe", async () => {
   await sql`create table test (x int)`;
-  return [
-    1,
-    (await sql.unsafe("insert into test values ($1) returning *", [1]))[0].x,
-    await sql`drop table test`,
-  ];
+  const [row] = await sql.unsafe(
+    "insert into test values ($1) returning *",
+    [1]
+  );
+  return [1, row.x, await sql`drop table test`];
 });
 
-t("unsafe simple", async () => [1, (await sql.unsafe("select 1 as x"))[0].x]);
+t("unsafe simple", async () => {
+  const [row] = await sql.unsafe("select 1 as x");
+  return [1, row.x];
+});
 
-t("unsafe simple includes columns", async () => [
-  "x",
-  (await sql.unsafe("select 1 as x").values()).columns[0].name,
-]);
+t("unsafe simple includes columns", async () => {
+  const { columns } = await sql.unsafe("select 1 as x").values();
+  return ["x", columns[0].name];
+});
 
-t("simple query using unsafe with multiple statements", async () => [
-  "1,2",
-  (await sql.unsafe("select 1 as x;select 2 as x")).map((x) => x[0].x).join(),
-]);
+t("simple query using unsafe with multiple statements", async () => {
+  const results = await sql.unsafe("select 1 as x;select 2 as x");
+  return ["1,2", results.map((x) => x[0].x).join(",")];
+});
 
-t("simple query using simple() with multiple statements", async () => [
-  "1,2",
-  (await sql`select 1 as x;select 2 as x`.simple()).map((x) => x[0].x).join(),
-]);
+t("simple query using simple() with multiple statements", async () => {
+  const results = await sql`select 1 as x;select 2 as x`.simple();
+  return ["1,2", results.map((x) => x[0].x).join(",")];
+});
 
 t("big query body", async () => {
   await sql`create table test (x int)`;
-  return [
-    50_000,
-    (
-      await sql`insert into test ${sql(
-        [...new Array(50_000).keys()].map((x) => ({ x }))
-      )}`
-    ).count,
-    await sql`drop table test`,
-  ];
+  const { count } = await sql`insert into test ${sql(
+    Array.from({ length: 50_000 }, (_, x) => ({ x }))
+  )}`;
+  return [50_000, count, await sql`drop table test`];
 });
 
 t("let postgres do implicit cast of unknown types", async () => {
@@ -77,81 +80,63 @@ t("let postgres do implicit cast of unknown types", async () => {
 
 t("only allows one statement", async () => [
   "42601",
-  await sql`select 1; select 2`.catch((e) => e.code),
+  await sql`select 1; select 2`.catch((error) => error.code),
 ]);
 
 t("dynamic table name", async () => {
   await sql`create table test(a int)`;
-  return [
-    0,
-    (await sql`select * from ${sql("test")}`).count,
-    await sql`drop table test`,
-  ];
+  const { count } = await sql`select * from ${sql("test")}`;
+  return [0, count, await sql`drop table test`];
 });
 
 t("dynamic schema name", async () => {
   await sql`create table test(a int)`;
-  return [
-    0,
-    (await sql`select * from ${sql("public")}.test`).count,
-    await sql`drop table test`,
-  ];
+  const { count } = await sql`select * from ${sql("public")}.test`;
+  return [0, count, await sql`drop table test`];
 });
 
 t("dynamic schema and table name", async () => {
   await sql`create table test(a int)`;
-  return [
-    0,
-    (await sql`select * from ${sql("public.test")}`).count,
-    await sql`drop table test`,
-  ];
+  const { count } = await sql`select * from ${sql("public.test")}`;
+  return [0, count, await sql`drop table test`];
 });
 
-t("dynamic column name", async () => [
-  "!not_valid",
-  Object.keys((await sql`select 1 as ${sql("!not_valid")}`)[0])[0],
-]);
+t("dynamic column name", async () => {
+  const [row] = await sql`select 1 as ${sql("!not_valid")}`;
+  return ["!not_valid", Object.keys(row)[0]];
+});
 
-t("dynamic select as", async () => [
-  "2",
-  (await sql`select ${sql({ a: 1, b: 2 })}`)[0].b,
-]);
+t("dynamic select as", async () => {
+  const [row] = await sql`select ${sql({ a: 1, b: 2 })}`;
+  return ["2", row.b];
+});
 
-t("dynamic select as pluck", async () => [
-  undefined,
-  (await sql`select ${sql({ a: 1, b: 2 }, "a")}`)[0].b,
-]);
+t("dynamic select as pluck", async () => {
+  const [row] = await sql`select ${sql({ a: 1, b: 2 }, "a")}`;
+  return [undefined, row.b];
+});
 
 t("dynamic insert", async () => {
   await sql`create table test (a int, b text)`;
   const x = { a: 42, b: "the answer" };
 
-  return [
-    "the answer",
-    (await sql`insert into test ${sql(x)} returning *`)[0].b,
-    await sql`drop table test`,
-  ];
+  const [row] = await sql`insert into test ${sql(x)} returning *`;
+  return ["the answer", row.b, await sql`drop table test`];
 });
 
 t("dynamic insert pluck", async () => {
   await sql`create table test (a int, b text)`;
   const x = { a: 42, b: "the answer" };
 
-  return [
-    null,
-    (await sql`insert into test ${sql(x, "a")} returning *`)[0].b,
-    await sql`drop table test`,
-  ];
+  const [row] = await sql`insert into test ${sql(x, "a")} returning *`;
+  return [null, row.b, await sql`drop table test`];
 });
 
 t("dynamic in with empty array", async () => {
   await sql`create table test (a int)`;
   await sql`insert into test values (1)`;
-  return [
-    (await sql`select * from test where null in ${sql([])}`).count,
-    0,
-    await sql`drop table test`,
-  ];
+  const { count } = await sql`select * from test where null in ${sql([])}`;
+  return [count, 0, await sql`drop table test`];
 });
 
 t("dynamic in after insert", async () => {
@@ -168,101 +153,74 @@ t("dynamic in after insert", async () => {
 
 t("array insert", async () => {
   await sql`create table test (a int, b int)`;
-  return [
-    2,
-    (await sql`insert into test (a, b) values ${sql([1, 2])} returning *`)[0].b,
-    await sql`drop table test`,
-  ];
+  const [row] =
+    await sql`insert into test (a, b) values ${sql([1, 2])} returning *`;
+  return [2, row.b, await sql`drop table test`];
 });
 
 t("where parameters in()", async () => {
   await sql`create table test (x text)`;
   await sql`insert into test values ('a')`;
-  return [
-    (await sql`select * from test where x in ${sql(["a", "b", "c"])}`)[0].x,
-    "a",
-    await sql`drop table test`,
-  ];
+  const [row] =
+    await sql`select * from test where x in ${sql(["a", "b", "c"])}`;
+  return [row.x, "a", await sql`drop table test`];
 });
 
-t("where parameters in() values before", async () => [
-  2,
-  (
-    await sql`
+t("where parameters in() values before", async () => {
+  const { count } = await sql`
     with rows as (
       select * from (values (1), (2), (3), (4)) as x(a)
     )
     select * from rows where a in ${sql([3, 4])}
-  `
-  ).count,
-]);
+  `;
+  return [2, count];
+});
 
 t("dynamic multi row insert", async () => {
   await sql`create table test (a int, b text)`;
   const x = { a: 42, b: "the answer" };
 
-  return [
-    "the answer",
-    (await sql`insert into test ${sql([x, x])} returning *`)[1].b,
-    await sql`drop table test`,
-  ];
+  const [, row] = await sql`insert into test ${sql([x, x])} returning *`;
+  return ["the answer", row.b, await sql`drop table test`];
 });
 
 t("dynamic update", async () => {
   await sql`create table test (a int, b text)`;
   await sql`insert into test (a, b) values (17, 'wrong')`;
 
-  return [
-    "the answer",
-    (
-      await sql`update test set ${sql({ a: 42, b: "the answer" })} returning *`
-    )[0].b,
-    await sql`drop table test`,
-  ];
+  const [row] =
+    await sql`update test set ${sql({ a: 42, b: "the answer" })} returning *`;
+  return ["the answer", row.b, await sql`drop table test`];
 });
 
 t("dynamic update pluck", async () => {
   await sql`create table test (a int, b text)`;
   await sql`insert into test (a, b) values (17, 'wrong')`;
 
-  return [
-    "wrong",
-    (
-      await sql`update test set ${sql({ a: 42, b: "the answer" }, "a")} returning *`
-    )[0].b,
-    await sql`drop table test`,
-  ];
+  const [row] =
+    await sql`update test set ${sql({ a: 42, b: "the answer" }, "a")} returning *`;
+  return ["wrong", row.b, await sql`drop table test`];
 });
 
 t("dynamic select array", async () => {
   await sql`create table test (a int, b text)`;
   await sql`insert into test (a, b) values (42, 'yay')`;
-  return [
-    "yay",
-    (await sql`select ${sql(["a", "b"])} from test`)[0].b,
-    await sql`drop table test`,
-  ];
+  const [row] = await sql`select ${sql(["a", "b"])} from test`;
+  return ["yay", row.b, await sql`drop table test`];
 });
 
 t("dynamic returning array", async () => {
   await sql`create table test (a int, b text)`;
-  return [
-    "yay",
-    (
-      await sql`insert into test (a, b) values (42, 'yay') returning ${sql(["a", "b"])}`
-    )[0].b,
-    await sql`drop table test`,
-  ];
+  const [row] =
+    await sql`insert into test (a, b) values (42, 'yay') returning ${sql(["a", "b"])}`;
+  return ["yay", row.b, await sql`drop table test`];
 });
 
 t("dynamic select args", async () => {
   await sql`create table test (a int, b text)`;
   await sql`insert into test (a, b) values (42, 'yay')`;
-  return [
-    "yay",
-    (await sql`select ${sql("a", "b")} from test`)[0].b,
-    await sql`drop table test`,
-  ];
+  const [row] = await sql`select ${sql("a", "b")} from test`;
+  return ["yay", row.b, await sql`drop table test`];
 });
 
 t("dynamic values single row", async () => {
@@ -285,19 +243,15 @@ t("dynamic values multi row", async () => {
 });
 
 t("Multiple queries", async () => {
-  const sql = postgres(options);
+  const db = postgres(options);
 
-  return [
-    4,
-    (
-      await Promise.all([
-        sql`select 1`,
-        sql`select 2`,
-        sql`select 3`,
-        sql`select 4`,
-      ])
-    ).length,
-  ];
+  const { length } = await Promise.all([
+    db`select 1`,
+    db`select 2`,
+    db`select 3`,
+    db`select 4`,
+  ]);
+  return [4, length];
 });
 
 t("Multiple statements", async () => [
@@ -312,36 +266,22 @@ t("Multiple statements", async () => [
 
 t("Insert empty array", async () => {
   await sql`create table tester (ints int[])`;
-  return [
-    Array.isArray(
-      (await sql`insert into tester (ints) values (${[]}) returning *`)[0].ints
-    ),
-    true,
-    await sql`drop table tester`,
-  ];
+  const [row] = await sql`insert into tester (ints) values (${[]}) returning *`;
+  return [Array.isArray(row.ints), true, await sql`drop table tester`];
 });
 
 t("Insert array in sql()", async () => {
   await sql`create table tester (ints int[])`;
-  return [
-    Array.isArray(
-      (await sql`insert into tester ${sql({ ints: [] })} returning *`)[0].ints
-    ),
-    true,
-    await sql`drop table tester`,
-  ];
+  const [row] = await sql`insert into tester ${sql({ ints: [] })} returning *`;
+  return [Array.isArray(row.ints), true, await sql`drop table tester`];
 });
 
 t("Escaping supports schemas and tables", async () => {
   await sql`create schema a`;
   await sql`create table a.b (c int)`;
   await sql`insert into a.b (c) values (1)`;
-  return [
-    1,
-    (await sql`select ${sql("a.b.c")} from a.b`)[0].c,
-    await sql`drop table a.b`,
-    await sql`drop schema a`,
-  ];
+  const [row] = await sql`select ${sql("a.b.c")} from a.b`;
+  return [1, row.c, await sql`drop table a.b`, await sql`drop schema a`];
 });
 
 t("Raw method returns values unparsed as Buffer", async () => {
@@ -349,14 +289,12 @@ t("Raw method returns values unparsed as Buffer", async () => {
   return [x instanceof Uint8Array, true];
 });
 
-t("Fragments", async () => [
-  1,
-  (
-    await sql`
+t("Fragments", async () => {
+  const [row] = await sql`
     ${sql`select`} 1 as x
-  `
-  )[0].x,
-]);
+  `;
+  return [1, row.x];
+});
 
 t("Supports fragments as dynamic parameters", async () => {
   await sql`create table test (a int, b bool)`;
@@ -366,17 +304,15 @@ t("Supports fragments as dynamic parameters", async () => {
     b: sql`exists(select 1 from test where b = ${true})`,
   })}`;
 
-  return [
-    "1,t2,t",
-    (await sql`select * from test`.raw()).join(""),
-    await sql`drop table test`,
-  ];
+  const rows = await sql`select * from test`.raw();
+  return ["1,t2,t", rows.join(""), await sql`drop table test`];
 });
 
 t("Supports nested fragments with parameters", async () => {
   await sql`create table test ${sql`(${sql("a")} ${sql`int`})`}`;
   await sql`insert into test values(1)`;
-  return [1, (await sql`select a from test`)[0].a, await sql`drop table test`];
+  const [row] = await sql`select a from test`;
+  return [1, row.a, await sql`drop table test`];
 });
 
 t("Supports multiple nested fragments with parameters", async () => {
@@ -409,11 +345,8 @@ t("Last keyword used even with duplicate keywords", async () => {
 t("Insert array with null", async () => {
   await sql`create table test (x int[])`;
   await sql`insert into test ${sql({ x: [1, null, 3] })}`;
-  return [
-    1,
-    (await sql`select x from test`)[0].x[0],
-    await sql`drop table test`,
-  ];
+  const [row] = await sql`select x from test`;
+  return [1, row.x[0], await sql`drop table test`];
 });
 
 t("Named arguments in a function call (#1040)", async () => {

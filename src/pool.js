@@ -4,82 +4,54 @@ import { Errors, PostgresError, queryError } from "./errors.js";
 import { Query } from "./query.js";
 import { open as startup } from "./startup.js";
 
-const begins = /\bbegin\b/i,
-  noop = () => {},
-  starts = /\bstart\b/gi,
-  transaction = /^transaction\b/i;
+const begins = /\bbegin\b/iu;
+const noop = () => {
+  // Nothing to do: a cancel is best effort, a lease's closed promise may have no one waiting on it,
+  // and a connection opened only to load types has no pool to tell about itself.
+};
+const starts = /\bstart\b/giu;
+const transaction = /^transaction\b/iu;
 
-export function Pool(options, types) {
-  const { setTimeout, clearTimeout, now } = options.timers,
-    statements = Statements(options.scheduler),
-    connections = new Set(),
-    waiting = Queue(),
-    events = {
-      parser: types.parser,
-      decoder: types.decoder,
-      binary: types.binary,
-      serializer: types.serializer,
-      plain: types.plain,
-      onready,
-      onclose,
-      onnotify: options.onnotify,
-      onparameter,
-      ontimed,
-      typed: options.fetch_types === false,
-      unknown: (oids) => !typesLoaded && types.unknown(oids),
-      need,
-    },
-    work = { fast: 0, slow: 0, at: 0 };
+export const Pool = (options, types) => {
+  const { setTimeout, clearTimeout, now } = options.timers;
+  const statements = Statements(options.scheduler);
+  const connections = new Set();
+  const waiting = Queue();
+  const work = { at: 0, fast: 0, slow: 0 };
 
-  const signal = { aborted: false, sockets: new Set() },
-    replacing = [],
-    eager = types.named || !!options.eager_types,
-    paused = new Set();
+  const signal = { aborted: false, sockets: new Set() };
+  const replacing = [];
+  const eager = types.named || !!options.eager_types;
+  const paused = new Set();
 
-  let opening = 0,
-    ending = null,
-    used = false,
-    endTimer = null,
-    retries = 0,
-    failingSince = null,
-    nextAttempt = 0,
-    retryTimer = null,
-    typesLoaded = options.fetch_types === false,
-    typesError = null,
-    typesFailed = 0,
-    failure = null,
-    typesLoading = false,
-    retryTypes = null,
-    typeRetries = 0,
-    typesFailing = null;
+  let opening = 0;
+  let ending = null;
+  let used = false;
+  let endTimer = null;
+  let retries = 0;
+  let failingSince = null;
+  let nextAttempt = 0;
+  let retryTimer = null;
+  let typesLoaded = options.fetch_types === false;
+  let typesError = null;
+  let typesFailed = 0;
+  let failure = null;
+  let typesLoading = false;
+  let retryTypes = null;
+  let typeRetries = 0;
+  let typesFailing = null;
 
-  const pool = {
-    query,
-    lease,
-    cancel,
-    end,
-    close,
-    get stats() {
-      return {
-        connections: connections.size,
-        opening,
-        idle: [...connections].filter((x) => x.inflight === 0 && !x.lease)
-          .length,
-        leased: [...connections].filter((x) => x.lease).length,
-        waiting: waiting.length,
-      };
-    },
-  };
-
-  return pool;
-
-  function query(q, lease) {
+  const timed = (q) =>
     options.query_timeout &&
-      !q.timer &&
-      !q.settled &&
-      !q.cursorFn &&
-      !q.streaming &&
+    !q.timer &&
+    !q.settled &&
+    !q.cursorFn &&
+    !q.streaming;
+
+  const query = (q, lease) => {
+    if (timed(q)) {
       deadline(q);
+    }
 
     if (ending && !lease) {
       return q.reject(
@@ -110,13 +82,7 @@ export function Pool(options, types) {
     const free = !lease && options.max !== 1;
 
     if (q.options.simple && !built.values.length) {
-      const known = (free || options.scheduler) && statements.known(built.text);
-      q.alone = free && alone(known);
-      options.scheduler && (q.cost = known);
-      return place(
-        { q, simple: built.text, exclusive: !!q.streaming || q.alone },
-        lease
-      );
+      return simple(q, built, free, lease);
     }
 
     if (q.onlyDescribe) {
@@ -129,113 +95,143 @@ export function Pool(options, types) {
     );
     q.alone =
       free && alone(statement.live ? statement : statements.known(built.text));
-    q.wire = { statement, built };
-    options.scheduler && (q.cost = statement.cost);
+    q.wire = { built, statement };
+    if (options.scheduler) {
+      q.cost = statement.cost;
+    }
     place(
       {
+        exclusive: !!q.cursorFn || !!q.streaming || q.alone,
         q,
         statement,
         typed: !typesLoaded && unknown(built.oids),
-        exclusive: !!q.cursorFn || !!q.streaming || q.alone,
       },
       lease
     );
-  }
+  };
 
-  function unknown(oids) {
-    for (let i = 0; i < oids.length; i++) {
-      if (oids[i] && !types.known(oids[i])) {
+  const simple = (q, built, free, lease) => {
+    const known = (free || options.scheduler) && statements.known(built.text);
+    q.alone = free && alone(known);
+    if (options.scheduler) {
+      q.cost = known;
+    }
+    return place(
+      { exclusive: !!q.streaming || q.alone, q, simple: built.text },
+      lease
+    );
+  };
+
+  const unknown = (oids) => {
+    for (const oid of oids) {
+      if (oid && !types.known(oid)) {
         return true;
       }
     }
     return false;
-  }
+  };
 
-  function deadline(q) {
+  const deadline = (q) => {
     q.timer = setTimeout(() => {
       q.timer = null;
-      q.settled || ((q.timedOut = true), cancel(q).catch(noop));
+      if (!q.settled) {
+        q.timedOut = true;
+        cancel(q).catch(noop);
+      }
     }, options.query_timeout * 1000);
-  }
+  };
 
-  function batch(q, lease) {
-    const parts = q.parts;
+  const batch = (q, lease) => {
+    const { parts } = q;
     if (!parts.length) {
       return q.resolve([]);
     }
 
-    for (let i = 0; i < parts.length; i++) {
+    for (let i = 0; i < parts.length; i += 1) {
       try {
         parts[i].build();
       } catch (error) {
-        error && typeof error === "object" && (error.index = i);
+        if (error && typeof error === "object") {
+          error.index = i;
+        }
         return unbuilt(q, error, lease);
       }
     }
 
-    parts.forEach((x) => {
-      const built = x.built;
+    for (const x of parts) {
+      const { built } = x;
       x.wire = {
+        built,
         statement: statements.get(
           built,
           options.prepare && x.options.prepare !== false
         ),
-        built,
       };
-    });
+    }
 
-    const run = (c) => (
-      (q.connection = c),
-      c.batch(q, parts),
-      q.onwrite && q.onwrite()
-    );
+    const write = (c) => {
+      q.connection = c;
+      c.batch(q, parts);
+      if (q.onwrite) {
+        q.onwrite();
+      }
+    };
     place(
       {
         q,
-        run,
+        run: write,
         typed: !typesLoaded && parts.some((x) => unknown(x.built.oids)),
       },
       lease
     );
-  }
+  };
 
-  function describeOnly(q, built, lease) {
+  const describeOnly = (q, built, lease) => {
     const statement = {
-        name: "",
-        text: built.text,
-        oids: built.oids,
-        columns: null,
-      },
-      run = (c) => (
-        (q.connection = c),
-        c.describe(statement, built.oids, q).then(
-          ({ params, columns }) =>
-            q.resolve({ string: built.text, types: params, name: "", columns }),
-          (error) => q.reject(queryError(error, q, options.debug))
-        ),
-        q.onwrite && q.onwrite()
+      columns: null,
+      name: "",
+      oids: built.oids,
+      text: built.text,
+    };
+    const describe = (c) => {
+      q.connection = c;
+      // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- then(fulfilled, rejected): the rejection handler must not see what q.resolve throws, and a catch() would settle a tick later
+      c.describe(statement, built.oids, q).then(
+        ({ params, columns }) =>
+          // oxlint-disable-next-line sort-keys -- the user gets this object, its key order shows in logs and JSON
+          q.resolve({ string: built.text, types: params, name: "", columns }),
+        (describeError) => q.reject(queryError(describeError, q, options.debug))
       );
-    lease
-      ? run(lease.connection)
-      : place({
-          run,
-          q,
-          reject: (error) => q.reject(queryError(error, q, options.debug)),
-        });
-  }
+      if (q.onwrite) {
+        q.onwrite();
+      }
+    };
 
-  function unbuilt(q, error, lease) {
-    error = queryError(error, q, options.debug);
+    if (lease) {
+      describe(lease.connection);
+    } else {
+      place({
+        q,
+        reject: (error) => q.reject(queryError(error, q, options.debug)),
+        run: describe,
+      });
+    }
+  };
+
+  const unbuilt = (q, error, lease) => {
+    const rejection = queryError(error, q, options.debug);
     if (!lease || lease.released || lease.connection.closed) {
-      return q.reject(error);
+      return q.reject(rejection);
     }
 
     q.connection = lease.connection;
-    lease.connection.local(q, error);
-    q.onwrite && q.onwrite();
-  }
+    lease.connection.local(q, rejection);
+    if (q.onwrite) {
+      q.onwrite();
+    }
+  };
 
-  function place(job, lease) {
+  const place = (job, lease) => {
     used = true;
     const missing = !lease && retype();
 
@@ -254,13 +250,15 @@ export function Pool(options, types) {
     }
 
     if (lease) {
-      return lease.connection.closed
-        ? job.q.reject(
-            queryError(lease.connection.closed, job.q, options.debug)
-          )
-        : lease.released
-          ? job.q.reject(queryError(ended(lease), job.q, options.debug))
-          : run(lease.connection, job);
+      if (lease.connection.closed) {
+        return job.q.reject(
+          queryError(lease.connection.closed, job.q, options.debug)
+        );
+      }
+      if (lease.released) {
+        return job.q.reject(queryError(ended(lease), job.q, options.debug));
+      }
+      return run(lease.connection, job);
     }
 
     if (signal.aborted) {
@@ -286,16 +284,16 @@ export function Pool(options, types) {
 
     waiting.push(wait(job));
     drain();
-  }
+  };
 
-  function wait(job) {
+  const wait = (job) => {
     if (!options.queue_timeout) {
       return job;
     }
 
     job.timer = setTimeout(() => {
       job.timer = null;
-      waiting.remove((x) => x === job) &&
+      if (waiting.remove((x) => x === job)) {
         reject(
           job,
           Errors.generic(
@@ -303,16 +301,22 @@ export function Pool(options, types) {
             `Waited more than ${options.queue_timeout} seconds for a connection`
           )
         );
+      }
     }, options.queue_timeout * 1000);
-    typeof job.timer.unref === "function" && job.timer.unref();
+    if (typeof job.timer.unref === "function") {
+      job.timer.unref();
+    }
     return job;
-  }
+  };
 
-  function started(job) {
-    job.timer && (clearTimeout(job.timer), (job.timer = null));
-  }
+  const started = (job) => {
+    if (job.timer) {
+      clearTimeout(job.timer);
+      job.timer = null;
+    }
+  };
 
-  function run(c, job) {
+  const run = (c, job) => {
     started(job);
     hold(c);
 
@@ -321,43 +325,47 @@ export function Pool(options, types) {
     }
 
     job.q.connection = c;
-    job.simple !== undefined ? c.simple(job.q, job.simple) : c.send(job.q);
-    job.q.onwrite && job.q.onwrite();
-  }
+    if (job.simple === undefined) {
+      c.send(job.q);
+    } else {
+      c.simple(job.q, job.simple);
+    }
+    if (job.q.onwrite) {
+      job.q.onwrite();
+    }
+  };
 
-  function drain() {
+  const drain = () => {
     while (waiting.length) {
-      const job = waiting.peek(),
-        c = pick(job);
+      const job = waiting.peek();
+      const c = pick(job);
 
       if (!c && !copying(job)) {
         break;
       }
 
       waiting.shift();
-      !c
-        ? reject(
-            job,
-            Errors.generic(
-              "COPY_IN_PROGRESS",
-              "You cannot execute queries during copy"
-            )
+      if (!c) {
+        reject(
+          job,
+          Errors.generic(
+            "COPY_IN_PROGRESS",
+            "You cannot execute queries during copy"
           )
-        : job.lease
-          ? grant(c, job)
-          : run(c, job);
+        );
+      } else if (job.lease) {
+        grant(c, job);
+      } else {
+        run(c, job);
+      }
     }
-    waiting.length &&
-      listened(channels.pool) &&
+    if (waiting.length && listened(channels.pool)) {
       event("wait", null, { waiting: waiting.length });
+    }
     grow();
-  }
+  };
 
-  function plain(job) {
-    return !!job.q && !job.lease && !job.exclusive && !job.run;
-  }
-
-  function copying(job) {
+  const copying = (job) => {
     if (
       !job.q ||
       connections.size + opening < options.max ||
@@ -372,52 +380,54 @@ export function Pool(options, types) {
       }
     }
     return true;
-  }
+  };
 
-  function quiet(c) {
-    return (
-      c.inflight === 0 || (!!c.typing && !c.typing.settled && c.inflight === 1)
-    );
-  }
+  const blocked = (job) =>
+    !typesLoaded && (eager ? job.lease || job.typed : job.typed);
 
-  function usable(c) {
-    return (
-      !c.closed &&
-      !c.closing &&
-      !c.lease &&
-      !c.releasing &&
-      !c.retiring &&
-      !c.exclusive &&
-      !c.loading
-    );
-  }
+  const pipelined = (c, best, job) =>
+    !job.lease &&
+    !job.exclusive &&
+    c.inflight < options.max_pipeline &&
+    (!best || c.inflight < best.inflight);
 
-  function pick(job) {
-    const statement = job.statement,
-      any = !statement || !statement.name;
+  const room = () => connections.size + opening < options.max && !failingSince;
 
-    if (!typesLoaded && (eager ? job.lease || job.typed : job.typed)) {
-      return (eager || need(), null);
+  const rescheduled = (best, job) =>
+    best && options.scheduler && job.q && needed(job)
+      ? scheduled(job) || best
+      : best;
+
+  const crowded = (best) =>
+    best &&
+    opening &&
+    best.inflight >= Math.ceil(waiting.length / (opening + 1));
+
+  const pick = (job) => {
+    const { statement } = job;
+    const any = !statement || !statement.name;
+
+    if (blocked(job)) {
+      if (!eager) {
+        need();
+      }
+      return null;
     }
 
-    let best = null,
-      soon = false;
+    let best = null;
+    let soon = false;
 
     for (const c of connections) {
-      c.loading && !c.closed && (soon = true);
+      if (c.loading && !c.closed) {
+        soon = true;
+      }
       const free = usable(c);
       if (free && quiet(c)) {
         if (any || c.prepared.has(statement.name)) {
           return c;
         }
         best = best && quiet(best) ? best : c;
-      } else if (
-        free &&
-        !job.lease &&
-        !job.exclusive &&
-        c.inflight < options.max_pipeline &&
-        (!best || c.inflight < best.inflight)
-      ) {
+      } else if (free && pipelined(c, best, job)) {
         best = c;
       }
     }
@@ -426,23 +436,15 @@ export function Pool(options, types) {
       return best;
     }
 
-    if (soon || (connections.size + opening < options.max && !failingSince)) {
+    if (soon || room()) {
       return null;
     }
 
-    best &&
-      options.scheduler &&
-      job.q &&
-      needed(job) &&
-      (best = scheduled(job) || best);
-    return best &&
-      opening &&
-      best.inflight >= Math.ceil(waiting.length / (opening + 1))
-      ? null
-      : best;
-  }
+    best = rescheduled(best, job);
+    return crowded(best) ? null : best;
+  };
 
-  function needed(job) {
+  const needed = (job) => {
     if (
       !job.q.cost ||
       job.q.cost.est === undefined ||
@@ -458,11 +460,11 @@ export function Pool(options, types) {
     }
 
     return false;
-  }
+  };
 
-  function scheduled(job) {
-    const t = now(),
-      e = job.q.cost ? job.q.cost.est : undefined;
+  const scheduled = (job) => {
+    const t = now();
+    const e = job.q.cost ? job.q.cost.est : undefined;
 
     if (e === undefined || e < slow) {
       return soonest(t, Infinity, false);
@@ -470,7 +472,9 @@ export function Pool(options, types) {
 
     let heavy = 0;
     for (const c of connections) {
-      c.inflight && c.heavy() && heavy++;
+      if (c.inflight && c.heavy()) {
+        heavy += 1;
+      }
     }
 
     decay(t);
@@ -484,12 +488,12 @@ export function Pool(options, types) {
     return heavy < connections.size - reserve
       ? soonest(t, Infinity, false)
       : soonest(t, 2 * e, true) || soonest(t, Infinity, false);
-  }
+  };
 
-  function soonest(t, most, heavy) {
-    let best = null,
-      value = Infinity,
-      ties = 0;
+  const soonest = (t, most, heavy) => {
+    let best = null;
+    let value = Infinity;
+    let ties = 0;
 
     for (const c of connections) {
       const v =
@@ -497,33 +501,37 @@ export function Pool(options, types) {
           ? c.backlog(t)
           : Infinity;
       if (v <= most && v < value) {
-        ((best = c), (value = v), (ties = 1));
-      } else if (
-        v <= most &&
-        v === value &&
-        v !== Infinity &&
-        Math.random() * ++ties < 1
-      ) {
         best = c;
+        value = v;
+        ties = 1;
+      } else if (v <= most && v === value && v !== Infinity) {
+        ties += 1;
+        if (Math.random() * ties < 1) {
+          best = c;
+        }
       }
     }
 
     return best;
-  }
+  };
 
-  function ontimed(sample, t) {
+  const ontimed = (sample, t) => {
     decay(t);
-    sample < slow ? (work.fast += sample) : (work.slow += sample);
-  }
+    if (sample < slow) {
+      work.fast += sample;
+    } else {
+      work.slow += sample;
+    }
+  };
 
-  function decay(t) {
+  const decay = (t) => {
     const d = Math.exp((work.at - t) / 2000);
     work.fast *= d;
     work.slow *= d;
     work.at = t;
-  }
+  };
 
-  function grow() {
+  const grow = () => {
     if (ending && waiting.length === 0) {
       return;
     }
@@ -537,15 +545,23 @@ export function Pool(options, types) {
       ) {
         return;
       }
-      const wait = nextAttempt - now();
-      return wait > 0
-        ? (retryTimer = setTimeout(() => ((retryTimer = null), grow()), wait))
-        : connect();
+      const delay = nextAttempt - now();
+      if (delay > 0) {
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          grow();
+        }, delay);
+      } else {
+        connect();
+      }
+      return;
     }
 
     let loading = 0;
     for (const c of connections) {
-      c.loading && loading++;
+      if (c.loading) {
+        loading += 1;
+      }
     }
 
     const wanted = Math.max(
@@ -558,85 +574,78 @@ export function Pool(options, types) {
         : 0
     );
 
-    for (let i = 0; i < wanted; i++) {
+    for (let i = 0; i < wanted; i += 1) {
       connect();
     }
-  }
+  };
 
-  function connect() {
-    opening++;
-    retryTimer && (clearTimeout(retryTimer), (retryTimer = null));
+  const connect = () => {
+    opening += 1;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+    // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- then(fulfilled, rejected): failed must not see what opened throws, and a catch() would run it a tick later
     (options.open || startup)(
       options,
       signal,
       replacing.length ? replacing.shift() : 0
     ).then(opened, failed);
-  }
+  };
 
-  function copy(error) {
-    if (!error || typeof error !== "object") {
-      return error;
-    }
+  const failingFast = () =>
+    !!failure && retries > 1 && opening === 0 && now() < nextAttempt && stuck();
 
-    const x = Object.create(
-      Object.getPrototypeOf(error),
-      Object.getOwnPropertyDescriptors(error)
-    );
-    Object.defineProperty(x, "stack", {
-      value: error.stack,
-      writable: true,
-      configurable: true,
-    });
-    ["query", "parameters", "args", "types"].forEach((k) => delete x[k]);
-    return x;
-  }
-
-  function failingFast() {
-    return (
-      !!failure &&
-      retries > 1 &&
-      opening === 0 &&
-      now() < nextAttempt &&
-      stuck()
-    );
-  }
-
-  function stuck() {
+  const stuck = () => {
     for (const c of connections) {
       if (!c.lease) {
         return false;
       }
     }
     return true;
-  }
+  };
 
-  function opened(ready) {
-    opening--;
+  const opened = (ready) => {
+    opening -= 1;
 
     if (signal.aborted || (ending && waiting.length === 0)) {
       ready.socket.destroy();
       return finishing();
     }
 
-    Object.entries(ready.parameters).forEach(([k, v]) => onparameter(k, v));
+    for (const [k, v] of Object.entries(ready.parameters)) {
+      onparameter(k, v);
+    }
     const c = Connection(ready, options, events);
     c.index = ready.index || 0;
     connections.add(c);
     lifetime(c);
-    listened(channels.pool) && event("open", c);
-    typesLoaded || !eager || (typesLoading ? (c.loading = true) : loadTypes(c));
-    c.loading || c.typing || (eager && typesLoading) || recovered();
+    if (listened(channels.pool)) {
+      event("open", c);
+    }
+    if (!typesLoaded && eager) {
+      if (typesLoading) {
+        c.loading = true;
+      } else {
+        loadTypes(c);
+      }
+    }
+    if (!c.loading && !c.typing && !(eager && typesLoading)) {
+      recovered();
+    }
     drain();
-  }
+  };
 
-  function recovered() {
+  const recovered = () => {
     retries = 0;
     failingSince = null;
     failure = null;
-  }
+  };
 
-  function need(c) {
-    c && paused.add(c);
+  const need = (c) => {
+    if (c) {
+      paused.add(c);
+    }
     if (typesLoaded) {
       return resume();
     }
@@ -646,112 +655,143 @@ export function Pool(options, types) {
     }
 
     typesLoading = true;
-    const idle = [...connections].find(
+    const spare = [...connections].find(
       (x) => !paused.has(x) && usable(x) && x.inflight === 0
     );
-    idle
-      ? fetched(types.load(runner(idle)))
-      : (options.open || startup)(options, signal, 0).then(
-          (ready) => {
-            const c = Connection(ready, options, {
-              ...events,
-              onready: () => {},
-              onclose: () => {},
-              onparameter: () => {},
-              ontimed: () => {},
-              need: () => {},
-            });
-            fetched(types.load(runner(c)).finally(() => c.close()));
-          },
-          (error) => fetched(Promise.reject(error))
-        );
-  }
+    if (spare) {
+      fetched(types.load(runner(spare)));
+      return;
+    }
 
-  function fetched(loading) {
-    let failure = null;
+    // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- then(fulfilled, rejected): the rejection handler must not see what the fulfilment handler throws, and a catch() would run it a tick later
+    (options.open || startup)(options, signal, 0).then(
+      (ready) => {
+        const loader = Connection(ready, options, {
+          ...events,
+          need: noop,
+          onclose: noop,
+          onparameter: noop,
+          onready: noop,
+          ontimed: noop,
+        });
+        return fetched(
+          types.load(runner(loader)).finally(() => loader.close())
+        );
+      },
+      (openError) => fetched(Promise.reject(openError))
+    );
+  };
+
+  const fetched = (loading) => {
+    let loadError = null;
+    // oxlint-disable-next-line promise/catch-or-return -- the first then handles both outcomes; a catch() at the end would swallow what the last step throws
     loading
       .then(
         () => (typesLoaded = true),
-        (error) =>
-          error instanceof PostgresError
+        (fetchError) =>
+          fetchError instanceof PostgresError
             ? (typesLoaded = true)
-            : (failure = error)
+            : (loadError = fetchError)
       )
-      .then(() => {
-        typesLoading = false;
-        events.typed = typesLoaded;
-        if (typesLoaded) {
-          typeRetries = 0;
-          typesFailing = null;
-          return resume();
-        }
+      .then(() => afterFetch(loadError));
+  };
 
-        typesFailing === null && (typesFailing = now());
-        typeRetries++;
-        if (
-          options.connect_timeout &&
-          now() - typesFailing >= options.connect_timeout * 1000
-        ) {
-          typeRetries = 0;
-          typesFailing = null;
-          return [...paused].forEach((x) => {
-            paused.delete(x);
-            x.destroy(
-              failure ||
-                Errors.connection("CONNECTION_CLOSED", options, x.host, x.port)
-            );
-          });
-        }
+  const afterFetch = (loadError) => {
+    typesLoading = false;
+    events.typed = typesLoaded;
+    if (typesLoaded) {
+      typeRetries = 0;
+      typesFailing = null;
+      return resume();
+    }
 
-        const wait =
-          1000 *
-          (typeof options.backoff === "function"
-            ? options.backoff(typeRetries)
-            : options.backoff);
-        paused.size &&
-          (retryTypes = setTimeout(() => ((retryTypes = null), need()), wait));
-      });
-  }
+    if (typesFailing === null) {
+      typesFailing = now();
+    }
+    typeRetries += 1;
+    if (
+      options.connect_timeout &&
+      now() - typesFailing >= options.connect_timeout * 1000
+    ) {
+      typeRetries = 0;
+      typesFailing = null;
+      const xs = [...paused];
+      for (const x of xs) {
+        paused.delete(x);
+        x.destroy(
+          loadError ||
+            Errors.connection("CONNECTION_CLOSED", options, x.host, x.port)
+        );
+      }
+      return;
+    }
 
-  function resume() {
+    const delay =
+      1000 *
+      (typeof options.backoff === "function"
+        ? options.backoff(typeRetries)
+        : options.backoff);
+    if (paused.size) {
+      retryTypes = setTimeout(() => {
+        retryTypes = null;
+        need();
+      }, delay);
+    }
+  };
+
+  const resume = () => {
     const xs = [...paused];
     paused.clear();
-    xs.forEach((x) => x.closed || x.go());
+    for (const x of xs) {
+      if (!x.closed) {
+        x.go();
+      }
+    }
     drain();
-  }
+  };
 
-  function runner(c) {
-    return (text) =>
-      new Promise((resolve, reject) => {
-        const q = new Query(
-          [text],
-          [],
-          Object.assign(() => {}, { options }),
-          { simple: true }
-        );
-        q.executed = true;
-        q.then(resolve, reject);
-        bound(c, q);
-        c.simple(q, text);
-      });
-  }
+  const runner = (c) => (text) => {
+    const { promise, resolve, reject: refuse } = Promise.withResolvers();
+    // What this throws rejects the promise, as from a promise executor.
+    try {
+      const q = new Query(
+        [text],
+        [],
+        Object.assign(
+          () => {
+            // Never called: the query is sent below, straight on c.
+          },
+          { options }
+        ),
+        { simple: true }
+      );
+      q.executed = true;
+      // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- settles the returned promise as q settles, on the same tick
+      q.then(resolve, refuse);
+      bound(c, q);
+      c.simple(q, text);
+    } catch (error) {
+      refuse(error);
+    }
+    return promise;
+  };
 
-  function bound(c, q) {
+  const bound = (c, q) => {
     if (!options.query_timeout) {
       return;
     }
 
-    const timer = setTimeout(
-      () => q.settled || c.cancel(q).catch(noop),
-      options.query_timeout * 1000
-    );
-    q.then(
-      () => clearTimeout(timer),
-      () => clearTimeout(timer)
-    );
-  }
+    const timer = setTimeout(() => {
+      if (!q.settled) {
+        c.cancel(q).catch(noop);
+      }
+    }, options.query_timeout * 1000);
+    const clear = () => clearTimeout(timer);
+    // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- clears the timer on either outcome, on the tick q settles
+    q.then(clear, clear);
+  };
 
-  function retype() {
+  const retype = () => {
     if (!typesError) {
       return null;
     }
@@ -761,71 +801,111 @@ export function Pool(options, types) {
     }
 
     typesError = null;
-    connections.forEach((x) => (x.loading = true));
-    [...connections].some((x) => !x.closed && (loadTypes(x), true));
+    for (const x of connections) {
+      x.loading = true;
+    }
+    for (const x of connections) {
+      if (!x.closed) {
+        loadTypes(x);
+        break;
+      }
+    }
     return null;
-  }
+  };
 
-  function loadTypes(c) {
+  const loadTypes = (c) => {
     hold(c);
     typesLoading = true;
     c.loading = types.named;
     c.typing = null;
+    // oxlint-disable-next-line promise/catch-or-return -- the first then handles both outcomes; a catch() at the end would swallow what the last step throws
     types
-      .load(
-        (text) =>
-          new Promise((resolve, reject) => {
-            const q = new Query(
-              [text],
-              [],
-              Object.assign(() => {}, { options }),
-              { simple: true }
-            );
-            q.executed = true;
-            q.then(resolve, reject);
-            types.named || (c.typing = q);
-            bound(c, q);
-            c.simple(q, text);
-          })
-      )
+      .load((text) => {
+        const { promise, resolve, reject: refuse } = Promise.withResolvers();
+        // What this throws rejects the promise, as from a promise executor.
+        try {
+          const q = new Query(
+            [text],
+            [],
+            Object.assign(
+              () => {
+                // Never called: the query is sent below, straight on c.
+              },
+              { options }
+            ),
+            { simple: true }
+          );
+          q.executed = true;
+          // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- settles the returned promise as q settles, on the same tick
+          q.then(resolve, refuse);
+          if (!types.named) {
+            c.typing = q;
+          }
+          bound(c, q);
+          c.simple(q, text);
+        } catch (error) {
+          refuse(error);
+        }
+        return promise;
+      })
       .then(
         () => (typesLoaded = true),
-        (error) =>
-          error instanceof PostgresError
-            ? (typesLoaded = true)
-            : error &&
-              error.code === "TYPE_NOT_FOUND" &&
-              ((typesError = error), (typesFailed = now()))
+        (loadError) => {
+          if (loadError instanceof PostgresError) {
+            typesLoaded = true;
+          } else if (loadError && loadError.code === "TYPE_NOT_FOUND") {
+            typesError = loadError;
+            typesFailed = now();
+          }
+        }
       )
-      .then(() => {
-        typesLoading = false;
-        events.typed = typesLoaded;
-        c.typing = null;
-        connections.forEach((x) => (x.loading = !typesLoaded && !typesError));
-        (typesLoaded || typesError) && recovered();
-        typesError
-          ? waiting.take().forEach((job) => reject(job, copy(typesError)))
-          : typesLoaded ||
-            [...connections].some(
-              (x) => !x.closed && !x.typing && (loadTypes(x), true)
-            );
-        drain();
-      });
-  }
+      .then(() => afterLoad(c));
+  };
 
-  function failed(error) {
-    opening--;
+  const afterLoad = (c) => {
+    typesLoading = false;
+    events.typed = typesLoaded;
+    c.typing = null;
+    for (const x of connections) {
+      x.loading = !typesLoaded && !typesError;
+    }
+    if (typesLoaded || typesError) {
+      recovered();
+    }
+    if (typesError) {
+      for (const job of waiting.take()) {
+        reject(job, copy(typesError));
+      }
+    } else if (!typesLoaded) {
+      for (const x of connections) {
+        if (!x.closed && !x.typing) {
+          loadTypes(x);
+          break;
+        }
+      }
+    }
+    drain();
+  };
+
+  const failed = (error) => {
+    opening -= 1;
     if (signal.aborted) {
       return finishing();
     }
 
     attempted(error);
-    ending ? finishing() : grow();
-  }
+    if (ending) {
+      finishing();
+    } else {
+      grow();
+    }
+  };
 
-  function attempted(error) {
-    failingSince === null && (failingSince = now());
-    retries++;
+  const attempted = (error) => {
+    if (failingSince === null) {
+      failingSince = now();
+    }
+    retries += 1;
     nextAttempt =
       now() +
       1000 *
@@ -834,44 +914,50 @@ export function Pool(options, types) {
           : options.backoff);
 
     const transient =
-        !!error &&
-        (error.code === "CONNECTION_CLOSED" || error.code === "53300"),
-      expired =
-        options.connect_timeout &&
-        now() - failingSince >= options.connect_timeout * 1000;
+      !!error && (error.code === "CONNECTION_CLOSED" || error.code === "53300");
+    const expired =
+      options.connect_timeout &&
+      now() - failingSince >= options.connect_timeout * 1000;
 
     failure = !transient || expired ? { error } : null;
-    stuck() &&
-      opening === 0 &&
-      (failure || ending) &&
-      waiting.take().forEach((job, i) => reject(job, i ? copy(error) : error));
-  }
+    if (stuck() && opening === 0 && (failure || ending)) {
+      for (const [i, job] of waiting.take().entries()) {
+        reject(job, i ? copy(error) : error);
+      }
+    }
+  };
 
-  function reject(job, error) {
+  const reject = (job, error) => {
     started(job);
-    job.lease
-      ? job.reject(error)
-      : job.q
-        ? job.q.reject(queryError(error, job.q, options.debug))
-        : job.reject(error);
-  }
+    if (job.lease) {
+      job.reject(error);
+    } else if (job.q) {
+      job.q.reject(queryError(error, job.q, options.debug));
+    } else {
+      job.reject(error);
+    }
+  };
 
-  function lifetime(c) {
+  const lifetime = (c) => {
     const life =
       typeof options.max_lifetime === "function"
         ? options.max_lifetime()
         : options.max_lifetime;
-    life &&
-      (c.lifeTimer = unref(
+    if (life) {
+      c.lifeTimer = unref(
         setTimeout(() => {
           c.retiring = true;
-          c.inflight === 0 && !c.lease && c.close();
+          if (c.inflight === 0 && !c.lease) {
+            c.close();
+          }
         }, life * 1000)
-      ));
+      );
+    }
     idle(c);
-  }
+  };
 
-  function event(name, c, extra) {
+  const event = (name, c, extra) => {
+    // oxlint-disable-next-line sort-keys -- a diagnostics message for subscribers, its key order shows in their logs and JSON
     channels.pool.publish({
       event: name,
       connection: c ? c.id : null,
@@ -881,39 +967,43 @@ export function Pool(options, types) {
       stats: pool.stats,
       ...extra,
     });
-  }
+  };
 
-  function idle(c) {
-    listened(channels.pool) && event("idle", c);
+  const idle = (c) => {
+    if (listened(channels.pool)) {
+      event("idle", c);
+    }
     if (c.inflight || c.lease) {
       return;
     }
 
-    options.unref_sockets && !c.loading && waiting.length === 0 && c.unref();
+    if (options.unref_sockets && !c.loading && waiting.length === 0) {
+      c.unref();
+    }
     if (!options.idle_timeout) {
       return;
     }
 
     c.idleSince = now();
-    c.idleTimer ||
-      (c.idleTimer = unref(
-        setTimeout(() => idled(c), options.idle_timeout * 1000)
-      ));
-  }
+    c.idleTimer ||= unref(
+      setTimeout(() => idled(c), options.idle_timeout * 1000)
+    );
+  };
 
-  function hold(c) {
-    options.unref_sockets && c.ref();
-  }
+  const hold = (c) => {
+    if (options.unref_sockets) {
+      c.ref();
+    }
+  };
 
-  function unref(timer) {
-    options.unref_sockets &&
-      timer &&
-      typeof timer.unref === "function" &&
+  const unref = (timer) => {
+    if (options.unref_sockets && timer && typeof timer.unref === "function") {
       timer.unref();
+    }
     return timer;
-  }
+  };
 
-  function idled(c) {
+  const idled = (c) => {
     c.idleTimer = null;
     if (c.inflight || c.lease || c.closed) {
       return;
@@ -924,12 +1014,14 @@ export function Pool(options, types) {
     }
 
     const left = options.idle_timeout * 1000 - (now() - c.idleSince);
-    left >= 1
-      ? (c.idleTimer = unref(setTimeout(() => idled(c), left)))
-      : c.close();
-  }
+    if (left >= 1) {
+      c.idleTimer = unref(setTimeout(() => idled(c), left));
+    } else {
+      c.close();
+    }
+  };
 
-  function onready(c) {
+  const onready = (c) => {
     if (c.releasing) {
       if (c.inflight) {
         return;
@@ -958,43 +1050,76 @@ export function Pool(options, types) {
       run(c, waiting.shift());
     }
 
-    waiting.length && !c.lease && c.inflight < options.max_pipeline && drain();
-    ending && waiting.length === 0 && finishing();
-  }
+    if (waiting.length && !c.lease && c.inflight < options.max_pipeline) {
+      drain();
+    }
+    if (ending && waiting.length === 0) {
+      finishing();
+    }
+  };
 
-  function onclose(c, error) {
+  // What a lease is told when its connection closes.
+  const closedBy = (c, error) => {
+    if (error.cause && error.cause.severity === "FATAL" && !c.uncertain) {
+      return error.cause;
+    }
+    if (error.code === "CONNECTION_DESTROYED") {
+      return Errors.connection("CONNECTION_CLOSED", options, c.host, c.port);
+    }
+    return error;
+  };
+
+  const onclose = (c, error) => {
     connections.delete(c);
-    (c.loading || c.typing) && !signal.aborted && attempted(copy(error));
+    if ((c.loading || c.typing) && !signal.aborted) {
+      attempted(copy(error));
+    }
     paused.delete(c);
-    ending ||
+    if (!ending) {
       replacing.push((c.index + 1) % (options.path ? 1 : options.host.length));
-    replacing.length > options.max && replacing.shift();
-    c.retired && c.retired.forEach((r) => r());
-    c.idleTimer && clearTimeout(c.idleTimer);
-    c.lifeTimer && clearTimeout(c.lifeTimer);
-    c.lease &&
-      c.lease.onclose &&
-      c.lease.onclose(
-        error.cause && error.cause.severity === "FATAL" && !c.uncertain
-          ? error.cause
-          : error.code === "CONNECTION_DESTROYED"
-            ? Errors.connection("CONNECTION_CLOSED", options, c.host, c.port)
-            : error
-      );
-    options.onclose && options.onclose(c.id);
-    listened(channels.pool) && event("close", c, { error });
-    connections.size === 0 && opening === 0 && statements.clear();
+    }
+    if (replacing.length > options.max) {
+      replacing.shift();
+    }
+    if (c.retired) {
+      for (const r of c.retired) {
+        r();
+      }
+    }
+    if (c.idleTimer) {
+      clearTimeout(c.idleTimer);
+    }
+    if (c.lifeTimer) {
+      clearTimeout(c.lifeTimer);
+    }
+    if (c.lease && c.lease.onclose) {
+      c.lease.onclose(closedBy(c, error));
+    }
+    if (options.onclose) {
+      options.onclose(c.id);
+    }
+    if (listened(channels.pool)) {
+      event("close", c, { error });
+    }
+    if (connections.size === 0 && opening === 0) {
+      statements.clear();
+    }
     drain();
-    ending && finishing();
-  }
+    if (ending) {
+      finishing();
+    }
+  };
 
-  function onparameter(k, v) {
-    options.parameters[k] !== v &&
-      ((options.parameters[k] = v),
-      options.onparameter && options.onparameter(k, v));
-  }
+  const onparameter = (k, v) => {
+    if (options.parameters[k] !== v) {
+      options.parameters[k] = v;
+      if (options.onparameter) {
+        options.onparameter(k, v);
+      }
+    }
+  };
 
-  async function lease(kind) {
+  const acquire = async (kind) => {
     used = true;
     // One tick before anything else, so that leases and queries start in the order they were made:
     // a query made before sql.begin runs first, also with max: 1.
@@ -1018,36 +1143,73 @@ export function Pool(options, types) {
       throw missing;
     }
 
-    return new Promise((resolve, reject) => {
+    const { promise, resolve, reject: refuse } = Promise.withResolvers();
+    // What this throws rejects the lease, unless it was granted already, as from a promise executor.
+    try {
       waiting.push(
         wait({
-          lease: true,
           kind,
-          resolve,
-          reject,
+          lease: true,
           queued: listened(channels.pool) ? now() : 0,
+          reject: refuse,
+          resolve,
         })
       );
       drain();
-    });
-  }
+    } catch (error) {
+      refuse(error);
+    }
+    return promise;
+  };
 
-  function grant(c, job) {
+  const grant = (c, job) => {
     started(job);
     hold(c);
-    c.idleTimer && (clearTimeout(c.idleTimer), (c.idleTimer = null));
-    let chain = Promise.resolve(),
-      released = false,
-      lost;
+    if (c.idleTimer) {
+      clearTimeout(c.idleTimer);
+      c.idleTimer = null;
+    }
+    let chain = Promise.resolve();
+    let released = false;
 
-    const closed = new Promise((_, reject) => (lost = reject));
-    closed.catch(() => {});
+    const { promise: closed, reject: lost } = Promise.withResolvers();
+    closed.catch(noop);
 
     const x = {
-      kind: job.kind,
-      error: null,
-      connection: c,
       closed,
+      connection: c,
+      error: null,
+      kind: job.kind,
+      onclose(error) {
+        x.error = error;
+        lost(error);
+      },
+      release() {
+        if (released) {
+          return;
+        }
+        released = true;
+        if (c.lease === x) {
+          c.lease = null;
+        }
+        if (listened(channels.pool)) {
+          event("release", c, { kind: job.kind });
+        }
+        if (c.closed) {
+          return;
+        }
+
+        if (c.inflight) {
+          c.releasing = true;
+          return true;
+        }
+
+        if (c.status === "I") {
+          onready(c);
+        } else {
+          c.close();
+        }
+      },
       get released() {
         return released;
       },
@@ -1060,53 +1222,42 @@ export function Pool(options, types) {
           return q.reject(queryError(ended(x), q, options.debug));
         }
 
-        chain = chain.then(
-          () =>
-            new Promise((resolve) => {
-              q.onwrite = resolve;
-              q.then(resolve, resolve);
-              query(q, x);
-            })
-        );
-      },
-      release() {
-        if (released) {
-          return;
-        }
-        released = true;
-        c.lease === x && (c.lease = null);
-        listened(channels.pool) && event("release", c, { kind: job.kind });
-        if (c.closed) {
-          return;
-        }
-
-        if (c.inflight) {
-          return (c.releasing = true);
-        }
-
-        c.status === "I" ? onready(c) : c.close();
-      },
-      onclose(error) {
-        x.error = error;
-        lost(error);
+        chain = chain.then(() => {
+          const { promise, resolve, reject: refuse } = Promise.withResolvers();
+          // What this throws rejects the step, as from a promise executor.
+          try {
+            q.onwrite = resolve;
+            // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- the next query waits until this one is written or settles, whichever comes first
+            q.then(resolve, resolve);
+            query(q, x);
+          } catch (error) {
+            refuse(error);
+          }
+          return promise;
+        });
       },
     };
 
     c.lease = x;
-    listened(channels.pool) &&
+    if (listened(channels.pool)) {
       event("lease", c, {
         kind: job.kind,
         waited: job.queued ? now() - job.queued : 0,
       });
+    }
     job.resolve(x);
-  }
+  };
 
-  function ended(lease) {
-    return Errors.generic("UNSAFE_TRANSACTION", `The ${lease.kind} has ended`);
-  }
-
-  function cancel(q) {
-    if (waiting.remove((x) => x.q === q && (started(x), true))) {
+  const cancel = (q) => {
+    if (
+      waiting.remove((x) => {
+        if (x.q !== q) {
+          return false;
+        }
+        started(x);
+        return true;
+      })
+    ) {
       q.reject(
         queryError(
           Errors.generic("57014", "canceling statement due to user request"),
@@ -1123,30 +1274,45 @@ export function Pool(options, types) {
 
     q.cancelled = true;
     return Promise.resolve();
-  }
+  };
 
-  function end({ timeout = null } = {}) {
+  const end = ({ timeout = null } = {}) => {
     if (ending) {
       return ending;
     }
 
-    ending = new Promise((resolve) => {
+    const { promise, resolve, reject: refuse } = Promise.withResolvers();
+    // What this throws rejects the promise, as from a promise executor.
+    try {
       pool.ended = resolve;
-      timeout !== null && (endTimer = setTimeout(destroy, timeout * 1000));
-      retryTimer && (clearTimeout(retryTimer), (retryTimer = null));
+      if (timeout !== null) {
+        endTimer = setTimeout(destroy, timeout * 1000);
+      }
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      // oxlint-disable-next-line promise/catch-or-return -- finishing runs in a microtask of its own; queueMicrotask would report what it throws differently
       Promise.resolve().then(finishing);
-    });
+    } catch (error) {
+      refuse(error);
+    }
+    ending = promise;
 
     return ending;
-  }
+  };
 
-  function finishing() {
+  const finishing = () => {
     if (!pool.ended) {
       return;
     }
 
     if (waiting.length === 0) {
-      connections.forEach((c) => c.inflight === 0 && !c.lease && c.close());
+      for (const c of connections) {
+        if (c.inflight === 0 && !c.lease) {
+          c.close();
+        }
+      }
     }
 
     if (connections.size === 0 && opening === 0 && waiting.length) {
@@ -1156,7 +1322,9 @@ export function Pool(options, types) {
         options.host[0],
         options.port[0]
       );
-      waiting.take().forEach((job) => reject(job, error));
+      for (const job of waiting.take()) {
+        reject(job, error);
+      }
     }
 
     if (
@@ -1164,62 +1332,127 @@ export function Pool(options, types) {
       (opening === 0 || signal.aborted) &&
       waiting.length === 0
     ) {
-      endTimer && clearTimeout(endTimer);
-      retryTimer && clearTimeout(retryTimer);
-      retryTypes && clearTimeout(retryTypes);
+      if (endTimer) {
+        clearTimeout(endTimer);
+      }
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+      }
+      if (retryTypes) {
+        clearTimeout(retryTypes);
+      }
       const resolve = pool.ended;
       pool.ended = null;
       resolve();
     }
-  }
+  };
 
-  function destroy() {
+  const destroy = () => {
     endTimer = null;
     signal.aborted = true;
-    signal.sockets.forEach((x) => x.destroy());
+    for (const x of signal.sockets) {
+      x.destroy();
+    }
     const error = Errors.connection(
       "CONNECTION_DESTROYED",
       options,
       options.host[0],
       options.port[0]
     );
-    waiting.take().forEach((job) => reject(job, error));
-    connections.forEach((c) => c.destroy());
-    connections.size === 0 && finishing();
-  }
+    for (const job of waiting.take()) {
+      reject(job, error);
+    }
+    for (const c of connections) {
+      c.destroy();
+    }
+    if (connections.size === 0) {
+      finishing();
+    }
+  };
 
-  function close() {
+  const close = () => {
     used = false;
     return Promise.all(
-      [...connections].map((c) =>
-        c.lease
-          ? new Promise(
-              (r) => ((c.retiring = true), (c.retired ||= []).push(r))
-            )
-          : c.close()
-      )
+      [...connections].map((c) => {
+        if (!c.lease) {
+          return c.close();
+        }
+        const { promise, resolve } = Promise.withResolvers();
+        c.retiring = true;
+        (c.retired ||= []).push(resolve);
+        return promise;
+      })
     );
-  }
-}
+  };
 
-export function Queue() {
-  let xs = [],
-    head = 0;
+  const events = {
+    binary: types.binary,
+    decoder: types.decoder,
+    need,
+    onclose,
+    onnotify: options.onnotify,
+    onparameter,
+    onready,
+    ontimed,
+    parser: types.parser,
+    plain: types.plain,
+    serializer: types.serializer,
+    typed: options.fetch_types === false,
+    unknown: (oids) => !typesLoaded && types.unknown(oids),
+  };
+
+  const pool = {
+    cancel,
+    close,
+    end,
+    lease: acquire,
+    query,
+    get stats() {
+      // oxlint-disable-next-line sort-keys -- sql.stats is handed to the user, its key order shows in logs and JSON
+      return {
+        connections: connections.size,
+        opening,
+        idle: [...connections].filter((x) => x.inflight === 0 && !x.lease)
+          .length,
+        leased: [...connections].filter((x) => x.lease).length,
+        waiting: waiting.length,
+      };
+    },
+  };
+
+  return pool;
+};
+
+export const Queue = () => {
+  let xs = [];
+  let head = 0;
 
   return {
     get length() {
       return xs.length - head;
     },
-    push: (x) => xs.push(x),
     peek: () => xs[head],
+    push: (x) => xs.push(x),
+    remove(fn) {
+      for (let i = head; i < xs.length; i += 1) {
+        if (fn(xs[i])) {
+          xs.splice(i, 1);
+          return true;
+        }
+      }
+      return false;
+    },
     shift() {
       const x = xs[head];
-      xs[head++] = undefined;
-      head === xs.length
-        ? ((xs = []), (head = 0))
-        : head > 1024 &&
-          head * 2 > xs.length &&
-          ((xs = xs.slice(head)), (head = 0));
+      xs[head] = undefined;
+      head += 1;
+      if (head === xs.length) {
+        xs = [];
+        head = 0;
+      } else if (head > 1024 && head * 2 > xs.length) {
+        xs = xs.slice(head);
+        head = 0;
+      }
       return x;
     },
     take() {
@@ -1228,24 +1461,57 @@ export function Queue() {
       head = 0;
       return all;
     },
-    remove(fn) {
-      for (let i = head; i < xs.length; i++) {
-        if (fn(xs[i])) {
-          return (xs.splice(i, 1), true);
-        }
-      }
-      return false;
-    },
   };
-}
+};
 
 const limit = 2000;
 
-function alone(x) {
-  return x.alone === undefined ? (x.alone = opens(x.text)) : x.alone;
-}
+const plain = (job) => !!job.q && !job.lease && !job.exclusive && !job.run;
 
-function opens(text) {
+const quiet = (c) =>
+  c.inflight === 0 || (!!c.typing && !c.typing.settled && c.inflight === 1);
+
+const usable = (c) =>
+  !c.closed &&
+  !c.closing &&
+  !c.lease &&
+  !c.releasing &&
+  !c.retiring &&
+  !c.exclusive &&
+  !c.loading;
+
+const copy = (error) => {
+  if (!error || typeof error !== "object") {
+    return error;
+  }
+
+  const x = Object.create(
+    Object.getPrototypeOf(error),
+    Object.getOwnPropertyDescriptors(error)
+  );
+  Object.defineProperty(x, "stack", {
+    configurable: true,
+    value: error.stack,
+    writable: true,
+  });
+  delete x.query;
+  delete x.parameters;
+  delete x.args;
+  delete x.types;
+  return x;
+};
+
+const ended = (lease) =>
+  Errors.generic("UNSAFE_TRANSACTION", `The ${lease.kind} has ended`);
+
+const alone = (x) => {
+  if (x.alone === undefined) {
+    x.alone = opens(x.text);
+  }
+  return x.alone;
+};
+
+const opens = (text) => {
   if (begins.test(text)) {
     return true;
   }
@@ -1256,8 +1522,8 @@ function opens(text) {
     const from = match.index + 5;
     let i = from;
     while (true) {
-      while (i < text.length && /\s/.test(text[i])) {
-        i++;
+      while (i < text.length && /\s/u.test(text[i])) {
+        i += 1;
       }
 
       if (text[i] !== "/" || text[i + 1] !== "*") {
@@ -1280,100 +1546,123 @@ function opens(text) {
   }
 
   return false;
-}
+};
 
-function Statements(scheduler) {
-  const prefix = Math.random().toString(36).slice(2, 10),
-    map = new Map(),
-    templates = new WeakMap();
+const Statements = (scheduler) => {
+  const prefix = Math.random().toString(36).slice(2, 10);
+  const map = new Map();
+  const templates = new WeakMap();
 
-  let counter = 1,
-    clock = 0;
+  let counter = 1;
+  let clock = 0;
 
   const texts = new Map();
 
-  return { get, clear, known };
+  // Each use takes the clock and moves it on, so the oldest is the least recently used.
+  const tick = () => {
+    const t = clock;
+    clock += 1;
+    return t;
+  };
 
-  function known(text) {
+  const known = (text) => {
     let x = texts.get(text);
     if (x) {
       return x;
     }
 
-    texts.set(text, (x = { text, est: undefined, alone: undefined }));
-    texts.size > limit && texts.delete(texts.keys().next().value);
+    x = { alone: undefined, est: undefined, text };
+    texts.set(text, x);
+    if (texts.size > limit) {
+      texts.delete(texts.keys().next().value);
+    }
     return x;
-  }
+  };
 
-  function get(built, prepare) {
+  const unnamed = (text) => ({
+    cost: scheduler ? known(text) : null,
+    ends: undefined,
+    key: null,
+    live: false,
+    name: "",
+    shape: undefined,
+    text,
+    used: 0,
+    version: 0,
+  });
+
+  const evict = () => {
+    let oldest = null;
+    for (const x of map.values()) {
+      if (!oldest || x.used < oldest.used) {
+        oldest = x;
+      }
+    }
+    oldest.live = false;
+    map.delete(oldest.key);
+  };
+
+  const add = (key, text) => {
+    const name = prefix + counter;
+    counter += 1;
+    const statement = {
+      alone: undefined,
+      cost: { est: undefined },
+      ends: undefined,
+      key,
+      live: true,
+      name,
+      shape: undefined,
+      text,
+      used: tick(),
+      version: 0,
+    };
+    map.set(key, statement);
+    if (map.size > limit) {
+      evict();
+    }
+    return statement;
+  };
+
+  const set = (strings) => {
+    const x = new Map();
+    templates.set(strings, x);
+    return x;
+  };
+
+  const get = (built, prepare) => {
     if (!prepare) {
       return unnamed(built.text);
     }
 
     const tagged =
-        !built.dynamic && (templates.get(built.strings) || set(built.strings)),
-      cached = tagged && tagged.get(built.types);
+      !built.dynamic && (templates.get(built.strings) || set(built.strings));
+    const cached = tagged && tagged.get(built.types);
 
     if (cached && cached.live) {
-      return ((cached.used = clock++), cached);
+      cached.used = tick();
+      return cached;
     }
 
     const key = `${built.types}\0${built.text}`;
     let statement = map.get(key);
-    statement ? (statement.used = clock++) : (statement = add(key, built.text));
-    tagged && tagged.set(built.types, statement);
-    return statement;
-  }
-
-  function unnamed(text) {
-    return {
-      key: null,
-      live: false,
-      name: "",
-      text,
-      ends: undefined,
-      shape: undefined,
-      version: 0,
-      used: 0,
-      cost: scheduler ? known(text) : null,
-    };
-  }
-
-  function add(key, text) {
-    const statement = {
-      key,
-      live: true,
-      name: prefix + counter++,
-      text,
-      ends: undefined,
-      shape: undefined,
-      version: 0,
-      used: clock++,
-      cost: { est: undefined },
-      alone: undefined,
-    };
-    map.set(key, statement);
-    map.size > limit && evict();
-    return statement;
-  }
-
-  function evict() {
-    let oldest = null;
-    for (const x of map.values()) {
-      (!oldest || x.used < oldest.used) && (oldest = x);
+    if (statement) {
+      statement.used = tick();
+    } else {
+      statement = add(key, built.text);
     }
-    oldest.live = false;
-    map.delete(oldest.key);
-  }
+    if (tagged) {
+      tagged.set(built.types, statement);
+    }
+    return statement;
+  };
 
-  function set(strings) {
-    const x = new Map();
-    templates.set(strings, x);
-    return x;
-  }
-
-  function clear() {
-    map.forEach((x) => (x.live = false));
+  const clear = () => {
+    for (const x of map.values()) {
+      x.live = false;
+    }
     map.clear();
-  }
-}
+  };
+
+  return { clear, get, known };
+};

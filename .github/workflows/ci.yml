@@ -34,7 +34,8 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - run: npm run lint
+      # Ultracite: Oxfmt checks the formatting, Oxlint the rules (oxlint.config.ts).
+      - run: npm run check
       - run: npm run test:types
       # Every link between the Markdown files, the README's links to docs/ included, leads somewhere.
       - run: npm run check:docs

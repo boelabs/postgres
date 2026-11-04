@@ -1,35 +1,38 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
-const postgres = (await import(process.env.POSTGRES_JS || "../src/index.js"))
-    .default,
-  here = path.dirname(new URL(import.meta.url).pathname),
-  dir = `${process.env.PGTEST_DIR || path.join(here, ".pgdata")}/failover`,
-  find =
-    "command -v pg_ctl || ls -d /usr/lib/postgresql/*/bin/pg_ctl | sort -V | tail -n 1",
-  bin =
-    process.env.PG_BIN ||
-    path.dirname(spawnSync("sh", ["-c", find]).stdout.toString().trim()),
-  url = "postgres://postgres@localhost:5434,localhost:5435/postgres",
-  delay = (ms) => new Promise((r) => setTimeout(r, ms)),
-  until = async (fn, ms = 100) => {
-    while (!fn()) {
-      await delay(ms);
-    }
-  },
-  ctl = (...args) =>
-    spawnSync(path.join(bin, "pg_ctl"), args, { encoding: "utf-8" }),
-  failures = [],
-  expected = new Set([
-    "CONNECTION_CLOSED",
-    "CONNECTION_DESTROYED",
-    "CONNECT_TIMEOUT",
-    "ECONNREFUSED",
-    "ECONNRESET",
-    "57P01",
-    "57P02",
-    "57P03",
-  ]);
+const { default: postgres } = await import(
+  process.env.POSTGRES_JS || "../src/index.js"
+);
+const here = path.dirname(new URL(import.meta.url).pathname);
+const dir = `${process.env.PGTEST_DIR || path.join(here, ".pgdata")}/failover`;
+const find =
+  "command -v pg_ctl || ls -d /usr/lib/postgresql/*/bin/pg_ctl | sort -V | tail -n 1";
+const bin =
+  process.env.PG_BIN ||
+  path.dirname(spawnSync("sh", ["-c", find]).stdout.toString().trim());
+const url = "postgres://postgres@localhost:5434,localhost:5435/postgres";
+const delay = (ms) => sleep(ms);
+const until = async (fn, ms = 100) => {
+  while (!fn()) {
+    // oxlint-disable-next-line no-await-in-loop -- polling: each check waits for the one before
+    await delay(ms);
+  }
+};
+const ctl = (...args) =>
+  spawnSync(path.join(bin, "pg_ctl"), args, { encoding: "utf-8" });
+const failures = [];
+const expected = new Set([
+  "CONNECTION_CLOSED",
+  "CONNECTION_DESTROYED",
+  "CONNECT_TIMEOUT",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "57P01",
+  "57P02",
+  "57P03",
+]);
 
 const setup = spawnSync("sh", [path.join(here, "failover.sh")], {
   encoding: "utf-8",
@@ -40,59 +43,70 @@ if (setup.status !== 0) {
 }
 
 const writer = postgres(url, {
-    target_session_attrs: "primary",
-    max: 4,
-    connect_timeout: 2,
-    idle_timeout: 1,
-    onnotice: false,
-  }),
-  reader = postgres(url, {
-    target_session_attrs: "prefer-standby",
-    max: 2,
-    connect_timeout: 2,
-    idle_timeout: 1,
-    onnotice: false,
-  });
+  connect_timeout: 2,
+  idle_timeout: 1,
+  max: 4,
+  onnotice: false,
+  target_session_attrs: "primary",
+});
+const reader = postgres(url, {
+  connect_timeout: 2,
+  idle_timeout: 1,
+  max: 2,
+  onnotice: false,
+  target_session_attrs: "prefer-standby",
+});
 
 await writer`create table failover (id int primary key, port int)`;
 await delay(500);
 
 const [{ standby }] = await reader`select pg_is_in_recovery() as standby`;
-standby || failures.push("prefer-standby did not connect to the standby");
-
-const state = { running: true };
-let id = 0,
-  written = 0,
-  lastPort = null,
-  failedAt = null,
-  resumedAt = null;
-const errors = {};
-
-async function write() {
-  while (state.running) {
-    const x = ++id;
-    try {
-      const [{ port }] =
-        await writer`insert into failover values (${x}, inet_server_port()) returning port`;
-      written++;
-      lastPort = port;
-      failedAt && !resumedAt && port === 5435 && (resumedAt = Date.now());
-    } catch (error) {
-      const code = error.code || error.message;
-      errors[code] = (errors[code] || 0) + 1;
-      code === "25006" &&
-        failures.push(`a write reached a read-only server: ${error.message}`);
-      expected.has(code) ||
-        code === "25006" ||
-        failures.push(`unexpected error: ${code} ${error.message}`);
-      await delay(50);
-    }
-  }
+if (!standby) {
+  failures.push("prefer-standby did not connect to the standby");
 }
 
-const writers = [...new Array(4)].map(write);
+const state = { running: true };
+let id = 0;
+let written = 0;
+let lastPort = null;
+let failedAt = null;
+let resumedAt = null;
+const errors = {};
+
+const writeOne = async () => {
+  id += 1;
+  const x = id;
+  try {
+    const [{ port }] =
+      await writer`insert into failover values (${x}, inet_server_port()) returning port`;
+    written += 1;
+    lastPort = port;
+    if (failedAt && !resumedAt && port === 5435) {
+      resumedAt = Date.now();
+    }
+  } catch (error) {
+    const code = error.code || error.message;
+    errors[code] = (errors[code] || 0) + 1;
+    if (code === "25006") {
+      failures.push(`a write reached a read-only server: ${error.message}`);
+    }
+    if (!expected.has(code) && code !== "25006") {
+      failures.push(`unexpected error: ${code} ${error.message}`);
+    }
+    await delay(50);
+  }
+};
+
+const write = async () => {
+  while (state.running) {
+    // oxlint-disable-next-line no-await-in-loop -- a writer makes one write after another
+    await writeOne();
+  }
+};
+
+const writers = Array.from({ length: 4 }, write);
 await delay(1000);
-const before = { written, port: lastPort };
+const before = { port: lastPort, written };
 
 ctl("-D", `${dir}/primary`, "-m", "immediate", "stop");
 failedAt = Date.now();
@@ -110,24 +124,29 @@ await Promise.race([
   ),
 ]);
 
-before.port === 5434 ||
+if (before.port !== 5434) {
   failures.push(`writes before the failover went to ${before.port}`);
-resumedAt || failures.push("writes did not resume within 20s of the failover");
-lastPort === 5435 ||
+}
+if (!resumedAt) {
+  failures.push("writes did not resume within 20s of the failover");
+}
+if (lastPort !== 5435) {
   failures.push(
     `writes after the failover went to ${lastPort}, not the promoted standby`
   );
+}
 
 const [{ count }] =
   await writer`select count(*)::int as count from failover`.catch(() => [
     { count: -1 },
   ]);
-count >= before.written ||
+if (!(count >= before.written)) {
   failures.push(
     `the promoted standby has ${count} rows, fewer than the ${
       before.written
     } written before the failover`
   );
+}
 
 const ended = await Promise.race([
   Promise.all([writer.end({ timeout: 2 }), reader.end({ timeout: 2 })]).then(
@@ -135,7 +154,9 @@ const ended = await Promise.race([
   ),
   delay(10_000).then(() => false),
 ]);
-ended || failures.push("end() did not resolve");
+if (!ended) {
+  failures.push("end() did not resolve");
+}
 
 spawnSync("sh", [path.join(here, "failover.sh"), "reset"]);
 

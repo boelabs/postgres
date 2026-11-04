@@ -5,7 +5,7 @@ const same = (xs) =>
   xs.every(
     (x) =>
       JSON.stringify(x) === JSON.stringify(xs[0]) &&
-      Object.keys(x).join() === Object.keys(xs[0]).join()
+      Object.keys(x).join(",") === Object.keys(xs[0]).join(",")
   );
 
 t("Rows keep the same shape and values across many rows", async () => {
@@ -73,7 +73,7 @@ t("Rows from .raw() are buffers across many rows", async () => {
 });
 
 t("Rows apply value and column transforms across many rows", async () => {
-  const sql = postgres({
+  const db = postgres({
     ...options,
     transform: {
       column: { from: (x) => x.toUpperCase() },
@@ -83,7 +83,7 @@ t("Rows apply value and column transforms across many rows", async () => {
     },
   });
   const rows =
-    await sql`select 1 as a, 'x' as b, null::int as c from generate_series(1, 40)`;
+    await db`select 1 as a, 'x' as b, null::int as c from generate_series(1, 40)`;
   return [
     "true",
     `${rows.every(
@@ -91,38 +91,38 @@ t("Rows apply value and column transforms across many rows", async () => {
         x.A === 10 &&
         x.B === "x" &&
         x.C === null &&
-        Object.keys(x).join() === "A,B,C"
+        Object.keys(x).join(",") === "A,B,C"
     )}`,
-    await sql.end(),
+    await db.end(),
   ];
 });
 
 t("Rows reach forEach across many rows", async () => {
   let n = 0;
+  // oxlint-disable-next-line unicorn/no-array-for-each -- the query's own forEach is what this tests
   await sql`select i, 'x' as s from generate_series(1, 40) as i`.forEach(
     (x) => (n += x.i + x.s.length)
   );
   return [860, n];
 });
 
+const protoColumn = async (n) => {
+  const rows =
+    await sql`select 'alice' as name, '{"isAdmin": true}'::json as "__proto__" from generate_series(1, ${n})`;
+  const row = rows.at(-1);
+  const own = Object.getOwnPropertyDescriptor(row, "__proto__");
+  return [
+    typeof row.isAdmin,
+    Object.getPrototypeOf(row) === Object.prototype,
+    Object.keys(row).join("+"),
+    own.value.isAdmin,
+  ].join(" ");
+};
+
 t(
   "A column named __proto__ is an own property and does not become the prototype of the row",
   async () => {
-    const results = [];
-    for (const n of [1, 40]) {
-      const rows =
-          await sql`select 'alice' as name, '{"isAdmin": true}'::json as "__proto__" from generate_series(1, ${n})`,
-        row = rows[rows.length - 1],
-        own = Object.getOwnPropertyDescriptor(row, "__proto__");
-      results.push(
-        [
-          typeof row.isAdmin,
-          Object.getPrototypeOf(row) === Object.prototype,
-          Object.keys(row).join("+"),
-          own.value.isAdmin,
-        ].join(" ")
-      );
-    }
+    const results = [await protoColumn(1), await protoColumn(40)];
     return [
       "undefined true name+__proto__ true|undefined true name+__proto__ true",
       results.join("|"),

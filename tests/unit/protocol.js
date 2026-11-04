@@ -18,27 +18,24 @@ const msg = (type, ...parts) => {
   return Buffer.concat([Buffer.from(type), i32(body.length + 4), body]);
 };
 
-t("Sync, Flush, Terminate, CopyDone", async () => [
+t("Sync, Flush, Terminate, CopyDone", () => [
   hex(Buffer.concat([msg("S"), msg("H"), msg("X"), msg("c")])),
   hex(Buffer.concat([p.Sync(), p.Flush(), p.Terminate(), p.CopyDone()])),
 ]);
 
-t("Query", async () => [
-  hex(msg("Q", str("select 1"))),
-  hex(p.Query("select 1")),
-]);
+t("Query", () => [hex(msg("Q", str("select 1"))), hex(p.Query("select 1"))]);
 
-t("Parse unnamed without types", async () => [
+t("Parse unnamed without types", () => [
   hex(msg("P", str(""), str("select 1"), i16(0))),
   hex(p.Parse("", "select 1", [])),
 ]);
 
-t("Parse named with types", async () => [
+t("Parse named with types", () => [
   hex(msg("P", str("s1"), str("select $1, $2"), i16(2), i32(23), i32(0))),
   hex(p.Parse("s1", "select $1, $2", [23, 0])),
 ]);
 
-t("Bind with text values and null", async () => [
+t("Bind with text values and null", () => [
   hex(
     msg(
       "B",
@@ -56,7 +53,7 @@ t("Bind with text values and null", async () => [
   hex(p.Bind("", "s1", [Buffer.from("42"), null, Buffer.alloc(0)])),
 ]);
 
-t("Bind accepts strings and measures utf8 bytes", async () => [
+t("Bind accepts strings and measures utf8 bytes", () => [
   hex(
     msg(
       "B",
@@ -72,7 +69,7 @@ t("Bind accepts strings and measures utf8 bytes", async () => [
   hex(p.Bind("c1", "", ["æø"])),
 ]);
 
-t("Bind with parameter and result formats", async () => [
+t("Bind with parameter and result formats", () => [
   hex(
     msg(
       "B",
@@ -91,7 +88,7 @@ t("Bind with parameter and result formats", async () => [
   hex(p.Bind("", "s2", [Buffer.from([1])], [1], [0, 1])),
 ]);
 
-t("Describe statement and portal", async () => [
+t("Describe statement and portal", () => [
   hex(
     Buffer.concat([
       msg("D", Buffer.from("S"), str("s1")),
@@ -101,14 +98,14 @@ t("Describe statement and portal", async () => [
   hex(Buffer.concat([p.Describe("S", "s1"), p.Describe("P", "")])),
 ]);
 
-t("Execute unnamed and named with a row limit", async () => [
+t("Execute unnamed and named with a row limit", () => [
   hex(
     Buffer.concat([msg("E", str(""), i32(0)), msg("E", str("c1"), i32(100))])
   ),
   hex(Buffer.concat([p.Execute("", 0), p.Execute("c1", 100)])),
 ]);
 
-t("Close portal and statement", async () => [
+t("Close portal and statement", () => [
   hex(
     Buffer.concat([
       msg("C", Buffer.from("P"), str("c1")),
@@ -118,12 +115,12 @@ t("Close portal and statement", async () => [
   hex(Buffer.concat([p.Close("P", "c1"), p.Close("S", "s1")])),
 ]);
 
-t("CopyData and CopyFail", async () => [
+t("CopyData and CopyFail", () => [
   hex(Buffer.concat([msg("d", Buffer.from("1,a\n")), msg("f", str("stop"))])),
   hex(Buffer.concat([p.CopyData(Buffer.from("1,a\n")), p.CopyFail("stop")])),
 ]);
 
-t("Startup has no type byte and ends with an empty name", async () => {
+t("Startup has no type byte and ends with an empty name", () => {
   const body = Buffer.concat([
     i32(196_608),
     str("user"),
@@ -134,11 +131,12 @@ t("Startup has no type byte and ends with an empty name", async () => {
   ]);
   return [
     hex(Buffer.concat([i32(body.length + 4), body])),
+    // oxlint-disable-next-line eslint/sort-keys -- Startup writes the parameters in this order, as the expected bytes are
     hex(p.Startup({ user: "u", database: "d" })),
   ];
 });
 
-t("SSLRequest and CancelRequest", async () => [
+t("SSLRequest and CancelRequest", () => [
   hex(
     Buffer.concat([
       i32(8),
@@ -152,7 +150,7 @@ t("SSLRequest and CancelRequest", async () => [
   hex(Buffer.concat([p.SSLRequest(), p.Cancel(1234, -5)])),
 ]);
 
-t("Password, SASL initial response and SASL response", async () => [
+t("Password, SASL initial response and SASL response", () => [
   hex(
     Buffer.concat([
       msg("p", str("secret")),
@@ -177,23 +175,25 @@ const stream = Buffer.concat([
   msg("Z", Buffer.from("I")),
 ]);
 
-function collect(chunks) {
-  const out = [],
-    frames = p.Frames((type, buffer, start, end) =>
-      out.push(String.fromCharCode(type) + (end - start))
-    );
-  chunks.forEach((x) => frames.push(x));
-  return out.join();
-}
+const collect = (chunks) => {
+  const out = [];
+  const frames = p.Frames((type, buffer, start, end) =>
+    out.push(String.fromCodePoint(type) + (end - start))
+  );
+  for (const x of chunks) {
+    frames.push(x);
+  }
+  return out.join(",");
+};
 
-t("Frames splits one chunk into messages with their full length", async () => [
+t("Frames splits one chunk into messages with their full length", () => [
   "15,T27,D12,C14,Z6",
   collect([stream]),
 ]);
 
-t("Frames gives the same messages for every two-way split", async () => {
+t("Frames gives the same messages for every two-way split", () => {
   const expected = collect([stream]);
-  for (let i = 1; i < stream.length; i++) {
+  for (let i = 1; i < stream.length; i += 1) {
     const got = collect([stream.subarray(0, i), stream.subarray(i)]);
     if (got !== expected) {
       return [expected, `${got} (split at ${i})`];
@@ -202,48 +202,54 @@ t("Frames gives the same messages for every two-way split", async () => {
   return [expected, expected];
 });
 
-t("Frames handles one byte at a time", async () => [
+t("Frames handles one byte at a time", () => [
   collect([stream]),
   collect([...stream].map((x) => Buffer.from([x]))),
 ]);
 
 t(
   "Frames on a shared read buffer keeps what it has not framed when paused, and what comes while paused",
-  async () => {
-    const expected = collect([stream]),
-      shared = Buffer.alloc(stream.length),
-      out = [],
-      frames = p.Frames((type, buffer, start, end) => {
-        out.push(String.fromCharCode(type) + (end - start));
-        type === 84 && frames.pause();
-      }, true),
-      read = (from, to) => (
-        stream.copy(shared, 0, from, to),
-        frames.push(shared.subarray(0, to - from)),
-        shared.fill(0)
-      );
+  () => {
+    const expected = collect([stream]);
+    const shared = Buffer.alloc(stream.length);
+    const out = [];
+    const frames = p.Frames((type, buffer, start, end) => {
+      out.push(String.fromCodePoint(type) + (end - start));
+      if (type === 84) {
+        frames.pause();
+      }
+    }, true);
+    const read = (from, to) => {
+      stream.copy(shared, 0, from, to);
+      frames.push(shared.subarray(0, to - from));
+      shared.fill(0);
+    };
     read(0, 20);
     read(20, 40);
     read(40, stream.length);
     frames.resume();
-    return [expected, out.join()];
+    return [expected, out.join(",")];
   }
 );
 
 t(
   "Frames owning a shared read buffer hands over messages that stay intact after the buffer is reused",
-  async () => {
-    const shared = Buffer.alloc(stream.length),
-      kept = [],
-      frames = p.Frames((type, buffer, start, end) => {
-        frames.owns(buffer) && kept.push(buffer.subarray(start, end));
-        type === 49 && frames.own(true);
-      }, true),
-      read = (from, to) => (
-        stream.copy(shared, 0, from, to),
-        frames.push(shared.subarray(0, to - from)),
-        shared.fill(0)
-      );
+  () => {
+    const shared = Buffer.alloc(stream.length);
+    const kept = [];
+    const frames = p.Frames((type, buffer, start, end) => {
+      if (frames.owns(buffer)) {
+        kept.push(buffer.subarray(start, end));
+      }
+      if (type === 49) {
+        frames.own(true);
+      }
+    }, true);
+    const read = (from, to) => {
+      stream.copy(shared, 0, from, to);
+      frames.push(shared.subarray(0, to - from));
+      shared.fill(0);
+    };
     read(0, 7);
     read(7, 20);
     read(20, stream.length);
@@ -252,20 +258,23 @@ t(
   }
 );
 
-t("Frames hands over the whole message buffer", async () => {
+t("Frames hands over the whole message buffer", () => {
   let got;
-  p.Frames(
-    (type, buffer, start, end) =>
-      type === 67 && (got = buffer.toString("utf-8", start + 5, end - 1))
-  ).push(stream);
+  p.Frames((type, buffer, start, end) => {
+    if (type === 67) {
+      got = buffer.toString("utf-8", start + 5, end - 1);
+    }
+  }).push(stream);
   return ["SELECT 1", got];
 });
 
-t("Frames pauses mid-chunk and resumes without a new push", async () => {
+t("Frames pauses mid-chunk and resumes without a new push", () => {
   const out = [];
   const frames = p.Frames((type) => {
-    out.push(String.fromCharCode(type));
-    type === 84 && frames.pause();
+    out.push(String.fromCodePoint(type));
+    if (type === 84) {
+      frames.pause();
+    }
   });
   frames.push(stream);
   const paused = out.join("");
@@ -275,7 +284,7 @@ t("Frames pauses mid-chunk and resumes without a new push", async () => {
 
 const decode = (fn, x) => fn(x, 0, x.length);
 
-t("Decode ErrorResponse fields", async () => {
+t("Decode ErrorResponse fields", () => {
   const e = decode(
     p.error,
     msg(
@@ -295,7 +304,7 @@ t("Decode ErrorResponse fields", async () => {
   ];
 });
 
-t("Decode ErrorResponse with the severity only in the S field", async () => {
+t("Decode ErrorResponse with the severity only in the S field", () => {
   const e = decode(
     p.error,
     msg(
@@ -314,7 +323,7 @@ t("Decode ErrorResponse with the severity only in the S field", async () => {
   ];
 });
 
-t("Decode RowDescription", async () => {
+t("Decode RowDescription", () => {
   const columns = decode(
     p.rowDescription,
     msg(
@@ -338,19 +347,19 @@ t("Decode RowDescription", async () => {
   );
   return [
     "id:16384:1:23,name:16384:2:25",
-    columns.map((x) => [x.name, x.table, x.number, x.type].join(":")).join(),
+    columns.map((x) => [x.name, x.table, x.number, x.type].join(":")).join(","),
   ];
 });
 
-t("Decode ParameterDescription", async () => [
+t("Decode ParameterDescription", () => [
   "23,25,0",
   decode(
     p.parameterDescription,
     msg("t", i16(3), i32(23), i32(25), i32(0))
-  ).join(),
+  ).join(","),
 ]);
 
-t("Decode CommandComplete", async () => [
+t("Decode CommandComplete", () => [
   "INSERT:3|SELECT:5|BEGIN:null|CREATE TABLE:null|COPY:2",
   ["INSERT 0 3", "SELECT 5", "BEGIN", "CREATE TABLE", "COPY 2"]
     .map((x) => decode(p.commandComplete, msg("C", str(x))))
@@ -358,14 +367,14 @@ t("Decode CommandComplete", async () => [
     .join("|"),
 ]);
 
-t("Decode ReadyForQuery status", async () => [
+t("Decode ReadyForQuery status", () => [
   "ITE",
   ["I", "T", "E"]
     .map((x) => decode(p.readyForQuery, msg("Z", Buffer.from(x))))
     .join(""),
 ]);
 
-t("Decode NotificationResponse", async () => {
+t("Decode NotificationResponse", () => {
   const x = decode(
     p.notification,
     msg("A", i32(42), str("chan"), str("hello"))
@@ -373,41 +382,42 @@ t("Decode NotificationResponse", async () => {
   return ["42:chan:hello", [x.pid, x.channel, x.payload].join(":")];
 });
 
-t("Decode ParameterStatus and BackendKeyData", async () => {
+t("Decode ParameterStatus and BackendKeyData", () => {
   const [name, value] = decode(
-      p.parameterStatus,
-      msg("S", str("TimeZone"), str("UTC"))
-    ),
-    key = decode(p.backendKeyData, msg("K", i32(99), i32(-7)));
+    p.parameterStatus,
+    msg("S", str("TimeZone"), str("UTC"))
+  );
+  const key = decode(p.backendKeyData, msg("K", i32(99), i32(-7)));
   return ["TimeZone=UTC 99/-7", `${name}=${value} ${key.pid}/${key.secret}`];
 });
 
 t(
   "A message that fails to encode leaves nothing behind for the next one",
-  async () => {
+  () => {
     const bad = {
       toString() {
         throw new Error("wat");
       },
     };
-    let error;
+    let message;
     try {
+      // oxlint-disable-next-line eslint/sort-keys -- Startup writes user before the failing value, which is what is left behind
       p.Startup({ user: "a", database: bad });
-    } catch (e) {
-      error = e.message;
+    } catch (error) {
+      ({ message } = error);
     }
     return [
       `wat ${p.Sync().toString("hex")}`,
-      `${error} ${p.Sync().toString("hex")}`,
+      `${message} ${p.Sync().toString("hex")}`,
     ];
   }
 );
 
 t(
   "Column table oids, numbers and type oids are read unsigned, as in v3",
-  async () => {
-    const name = Buffer.from("a\0"),
-      body = Buffer.alloc(2 + name.length + 18);
+  () => {
+    const name = Buffer.from("a\0");
+    const body = Buffer.alloc(2 + name.length + 18);
     body.writeUInt16BE(1, 0);
     name.copy(body, 2);
     body.writeUInt32BE(0xff_ff_ff_f0, 2 + name.length);
@@ -423,9 +433,9 @@ t(
   }
 );
 
-t("A parameter type oid above 2^31 is written as its four bytes", async () => {
+t("A parameter type oid above 2^31 is written as its four bytes", () => {
   const w = p.Writer(64);
   p.parse(w, "", "select $1", [0x80_00_00_01]);
   const x = w.take();
-  return ["80000001", x.subarray(x.length - 4).toString("hex")];
+  return ["80000001", x.subarray(-4).toString("hex")];
 });
