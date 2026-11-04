@@ -154,7 +154,6 @@ const Postgres = function Postgres(a, b) {
         values = [];
       }
       const fileHandler = (query) =>
-        // oxlint-disable-next-line promise/prefer-await-to-callbacks -- the callback API as before: fs/promises reads the file on other ticks
         fs.readFile(path, "utf-8", (err, string) => {
           if (err) {
             return query.reject(err);
@@ -397,7 +396,6 @@ const Postgres = function Postgres(a, b) {
         // What this throws rejects the promise, as from a promise executor.
         try {
           const x = body(scoped);
-          // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- settles the promise as the scope's work settles, on the same tick
           Promise.resolve(Array.isArray(x) ? Promise.all(x) : x).then(
             resolve,
             reject
@@ -636,7 +634,6 @@ const Listen = (options) => {
   const relisten = (channel, name, retries = 0) => {
     channel.timer = null;
     channel.result = listenTo(name);
-    // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- then(fulfilled, rejected): the retry must not follow what an onlisten throws, and a catch() would run it a tick later
     channel.result.then(
       (result) => relistened(channel, result),
       () => {

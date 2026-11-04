@@ -99,7 +99,6 @@ t("Rows apply value and column transforms across many rows", async () => {
 
 t("Rows reach forEach across many rows", async () => {
   let n = 0;
-  // oxlint-disable-next-line unicorn/no-array-for-each -- the query's own forEach is what this tests
   await sql`select i, 'x' as s from generate_series(1, 40) as i`.forEach(
     (x) => (n += x.i + x.s.length)
   );

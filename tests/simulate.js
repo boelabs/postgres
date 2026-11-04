@@ -481,7 +481,6 @@ const simulate = async (seed) => {
   let ended = false;
   try {
     await clock.run(10_000);
-    // oxlint-disable-next-line promise/prefer-catch, promise/catch-or-return -- a .catch would settle a tick later and also catch the first handler; end() is awaited through the clock, not here
     sql.end({ timeout: 1 }).then(
       () => (ended = true),
       (endError) => violations.push(`end() rejected: ${endError.message}`)
@@ -544,7 +543,6 @@ const simulate = async (seed) => {
 
 let failed = 0;
 for (let seed = first; seed < first + runs; seed += 1) {
-  // oxlint-disable-next-line no-await-in-loop -- seeds run one after another: each one owns the process's handlers and the clock
   const result = await simulate(seed);
   if (result.violations.length) {
     failed += 1;

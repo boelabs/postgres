@@ -195,7 +195,6 @@ export const Pool = (options, types) => {
     };
     const describe = (c) => {
       q.connection = c;
-      // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- then(fulfilled, rejected): the rejection handler must not see what q.resolve throws, and a catch() would settle a tick later
       c.describe(statement, built.oids, q).then(
         ({ params, columns }) =>
           // oxlint-disable-next-line sort-keys -- the user gets this object, its key order shows in logs and JSON
@@ -585,7 +584,6 @@ export const Pool = (options, types) => {
       clearTimeout(retryTimer);
       retryTimer = null;
     }
-    // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- then(fulfilled, rejected): failed must not see what opened throws, and a catch() would run it a tick later
     (options.open || startup)(
       options,
       signal,
@@ -663,7 +661,6 @@ export const Pool = (options, types) => {
       return;
     }
 
-    // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- then(fulfilled, rejected): the rejection handler must not see what the fulfilment handler throws, and a catch() would run it a tick later
     (options.open || startup)(options, signal, 0).then(
       (ready) => {
         const loader = Connection(ready, options, {
@@ -684,7 +681,6 @@ export const Pool = (options, types) => {
 
   const fetched = (loading) => {
     let loadError = null;
-    // oxlint-disable-next-line promise/catch-or-return -- the first then handles both outcomes; a catch() at the end would swallow what the last step throws
     loading
       .then(
         () => (typesLoaded = true),
@@ -766,7 +762,6 @@ export const Pool = (options, types) => {
         { simple: true }
       );
       q.executed = true;
-      // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- settles the returned promise as q settles, on the same tick
       q.then(resolve, refuse);
       bound(c, q);
       c.simple(q, text);
@@ -787,7 +782,6 @@ export const Pool = (options, types) => {
       }
     }, options.query_timeout * 1000);
     const clear = () => clearTimeout(timer);
-    // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- clears the timer on either outcome, on the tick q settles
     q.then(clear, clear);
   };
 
@@ -818,7 +812,6 @@ export const Pool = (options, types) => {
     typesLoading = true;
     c.loading = types.named;
     c.typing = null;
-    // oxlint-disable-next-line promise/catch-or-return -- the first then handles both outcomes; a catch() at the end would swallow what the last step throws
     types
       .load((text) => {
         const { promise, resolve, reject: refuse } = Promise.withResolvers();
@@ -836,7 +829,6 @@ export const Pool = (options, types) => {
             { simple: true }
           );
           q.executed = true;
-          // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- settles the returned promise as q settles, on the same tick
           q.then(resolve, refuse);
           if (!types.named) {
             c.typing = q;
@@ -1227,7 +1219,6 @@ export const Pool = (options, types) => {
           // What this throws rejects the step, as from a promise executor.
           try {
             q.onwrite = resolve;
-            // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- the next query waits until this one is written or settles, whichever comes first
             q.then(resolve, resolve);
             query(q, x);
           } catch (error) {
@@ -1292,7 +1283,6 @@ export const Pool = (options, types) => {
         clearTimeout(retryTimer);
         retryTimer = null;
       }
-      // oxlint-disable-next-line promise/catch-or-return -- finishing runs in a microtask of its own; queueMicrotask would report what it throws differently
       Promise.resolve().then(finishing);
     } catch (error) {
       refuse(error);

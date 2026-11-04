@@ -15,7 +15,6 @@ t("sql file has forEach", async () => {
   let result;
   await sql
     .file(rel("select.sql"), { cache: false })
-    // oxlint-disable-next-line unicorn/no-array-for-each -- the query's own forEach is what this tests
     .forEach(({ x }) => (result = x));
 
   return [1, result];

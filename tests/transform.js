@@ -168,7 +168,6 @@ t("Transform row forEach", async () => {
     transform: { row: () => 1 },
   });
 
-  // oxlint-disable-next-line unicorn/no-array-for-each -- the query's own forEach is what this tests
   await sql`select 1`.forEach((x) => (result = x));
 
   return [1, result];

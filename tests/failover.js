@@ -16,7 +16,6 @@ const url = "postgres://postgres@localhost:5434,localhost:5435/postgres";
 const delay = (ms) => sleep(ms);
 const until = async (fn, ms = 100) => {
   while (!fn()) {
-    // oxlint-disable-next-line no-await-in-loop -- polling: each check waits for the one before
     await delay(ms);
   }
 };
@@ -99,7 +98,6 @@ const writeOne = async () => {
 
 const write = async () => {
   while (state.running) {
-    // oxlint-disable-next-line no-await-in-loop -- a writer makes one write after another
     await writeOne();
   }
 };

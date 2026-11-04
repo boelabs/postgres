@@ -154,7 +154,6 @@ const until = async (fn, ms, state) => {
         `Timed out waiting for ${fn}${state ? ` with ${state()}` : ""}`
       );
     }
-    // oxlint-disable-next-line no-await-in-loop -- polling: each check waits for the one before
     await delay(10);
   }
 };
@@ -162,7 +161,6 @@ const until = async (fn, ms, state) => {
 // Polls with no time limit of its own: the test's timeout ends it.
 const untilTrue = async (fn) => {
   while (!fn()) {
-    // oxlint-disable-next-line no-await-in-loop -- polling: each check waits for the one before
     await delay(20);
   }
 };
@@ -183,7 +181,6 @@ const replicating = async (name) => {
       await sql`drop table test`;
       await sql`drop publication alltables`;
       for (const slot of slots) {
-        // oxlint-disable-next-line no-await-in-loop -- the slots are dropped one after another
         await sql`select pg_drop_replication_slot(slot_name) from pg_replication_slots where slot_name = ${slot}`;
       }
       await sql.end();
@@ -243,7 +240,6 @@ t(
       seen.push(row.id);
     });
     for (let i = 0; i < 10; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- one transaction after another is the commit order tested
       await sql`insert into test (name) values (${`x${i}`})`;
     }
     await until(() => seen.length === 10);
@@ -427,9 +423,7 @@ t(
 
     for (let i = 1; i <= 12; i += 1) {
       const before = seen.subscribes;
-      // oxlint-disable-next-line no-await-in-loop -- each close waits for the reconnect before it
       await subscribeSql.close();
-      // oxlint-disable-next-line no-await-in-loop -- each close waits for the reconnect before it
       await untilTrue(() => seen.subscribes !== before);
     }
 

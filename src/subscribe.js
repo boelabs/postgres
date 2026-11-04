@@ -47,7 +47,6 @@ export default function Subscribe(postgres, options) {
         onsubscribe();
         return { sql, state, unsubscribe };
       },
-      // oxlint-disable-next-line promise/prefer-await-to-callbacks -- awaiting would settle the subscription on different ticks
       (error) => {
         unsubscribe();
         connection = null;
@@ -75,7 +74,6 @@ export default function Subscribe(postgres, options) {
           }
           return x;
         },
-        // oxlint-disable-next-line promise/prefer-await-to-callbacks -- part of the reconnect chain stored in connection, which awaiting would turn into another promise and other ticks
         (error) => {
           report(error);
           if (!ended) {
@@ -193,7 +191,6 @@ export default function Subscribe(postgres, options) {
           continue;
         }
         if (result && typeof result.then === "function") {
-          // oxlint-disable-next-line promise/prefer-await-to-callbacks -- the subscriber's own promise, collected for Promise.all; awaiting here would serialize subscribers
           pending.push(result.catch((error) => fail(error, subscriber)));
         }
       }

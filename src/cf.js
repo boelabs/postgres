@@ -125,7 +125,6 @@ const Stream = (raw, secure, host, port) => {
 
       for (let i = 0; i < data.length; i += chunk) {
         pending += 1;
-        // oxlint-disable-next-line promise/prefer-catch, promise/catch-or-return -- fail must run on the same tick as the rejection and must not catch a throw from a drain listener
         writer.write(data.subarray(i, i + chunk)).then(written, fail);
       }
       return pending < 16;
@@ -142,10 +141,8 @@ const Stream = (raw, secure, host, port) => {
     try {
       while (true) {
         if (paused) {
-          // oxlint-disable-next-line no-await-in-loop -- reads are sequential: the next read waits for resume()
           await resumed();
         }
-        // oxlint-disable-next-line no-await-in-loop -- a stream is read one chunk after another
         const { value, done } = await reader.read();
 
         if (done) {

@@ -102,7 +102,6 @@ const queries = async () => {
   const statement = await sql`select ${1}::int as x`.describe();
   statement.types.map((x) => x + 1);
 
-  // oxlint-disable-next-line unicorn/no-array-for-each -- the forEach of a query, not of an array
   await sql<User[]>`select * from users`.forEach((user) => {
     expect<Equal<typeof user, User>>();
   });

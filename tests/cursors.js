@@ -7,20 +7,17 @@ const noop = () => {
 
 const until = async (fn) => {
   while (!fn()) {
-    // oxlint-disable-next-line no-await-in-loop -- polls until the condition holds
     await delay(5);
   }
 };
 
 t("forEach", async () => {
   let result;
-  // oxlint-disable-next-line unicorn/no-array-for-each -- the query's own forEach, which this tests
   await sql`select 1 as x`.forEach(({ x }) => (result = x));
   return [1, result];
 });
 
 t("forEach returns empty array", async () => {
-  // oxlint-disable-next-line unicorn/no-array-for-each -- the query's own forEach, which this tests
   const rows = await sql`select 1 as x`.forEach(noop);
   return [0, rows.length];
 });
@@ -188,7 +185,6 @@ t(
 
 t("forEach has result as second argument", async () => {
   let x;
-  // oxlint-disable-next-line unicorn/no-array-for-each -- the query's own forEach, which this tests
   await sql`select 1 as x`.forEach((_, result) => (x = result));
   return ["x", x.columns[0].name];
 });
@@ -266,7 +262,6 @@ t(
       const q = tx`select ${"value"}::text as a, ${Math.random()}::float8 as cursor_order_shape`;
       q.catch(noop);
       for (let i = 0; i < 10; i += 1) {
-        // oxlint-disable-next-line no-await-in-loop -- waits exactly ten microtask ticks
         await Promise.resolve();
       }
       await step();
@@ -295,7 +290,6 @@ t(
     );
     cursor.catch(noop);
     while (!batches.length) {
-      // oxlint-disable-next-line no-await-in-loop -- polls until the first batch has arrived
       await delay(2);
     }
     const [{ a }] = await reserved`select 'q1' as a`;

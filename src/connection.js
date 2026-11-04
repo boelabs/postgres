@@ -831,7 +831,6 @@ export const Connection = (ready, options, events) => {
         return (expect(x), x.cancel.resolve());
       }
 
-      // oxlint-disable-next-line promise/prefer-catch -- with .catch the canceller would hear of a rejection a tick later
       return cancelling(x).then(x.cancel.resolve, x.cancel.reject);
     };
 
@@ -1593,7 +1592,6 @@ export const Connection = (ready, options, events) => {
     }
 
     if (x.last) {
-      // oxlint-disable-next-line promise/prefer-catch -- a throw in the first handler must not reach the second, which reports a failed cursor callback
       return x.last.then(
         () => query.settled || finish(x),
         (cursorError) =>
@@ -1698,7 +1696,6 @@ export const Connection = (ready, options, events) => {
 
     running.add(query);
 
-    // oxlint-disable-next-line promise/prefer-catch -- a throw in the first handler must not reach the second, which reports a failed cursor callback
     return attempt(() => query.cursorFn(x.result)).then(
       (next) => {
         running.delete(query);

@@ -120,8 +120,8 @@ if (broken.length) {
     `${broken.length} broken link${
       broken.length === 1 ? "" : "s"
     }:\n${broken.join("\n")}`
-  ); // eslint-disable-line no-console
+  );
   process.exitCode = 1;
 } else {
-  console.log(`Links in ${files.length} Markdown files are fine.`); // eslint-disable-line no-console
+  console.log(`Links in ${files.length} Markdown files are fine.`);
 }

@@ -490,7 +490,6 @@ t(
     const id = "6f1c2c43-6f6b-4a40-9a39-2d8f4a1f3b11";
     const rows = [];
     for (let i = 0; i < 3; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- each insert runs after the one before
       const [{ x }] = await insert(id);
       rows.push(x);
     }
@@ -546,7 +545,6 @@ t(
           (error) => error.code
         );
         for (let i = 0; i < 5; i += 1) {
-          // oxlint-disable-next-line no-await-in-loop -- waits exactly five microtask ticks
           await Promise.resolve();
         }
         const b = db`select ${2}::int as shared_describe_shape`.then(
@@ -585,7 +583,6 @@ t(
     const before = await counts();
     const codes = new Set();
     for (let i = 0; i < 50; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- each round runs after the one before
       await Promise.all([
         q("not-a-uuid").catch((error) => codes.add(error.code)),
         q(zero),
@@ -669,7 +666,6 @@ t(
     const results = [];
     for (let i = 0; i < 5; i += 1) {
       results.push(
-        // oxlint-disable-next-line no-await-in-loop -- each pair of transactions runs after the one before
         ...(await Promise.all([tenant("tenant_a", 20), tenant("tenant_b", 10)]))
       );
     }
@@ -717,7 +713,6 @@ t(
     ];
     const after = [];
     for (let i = 0; i < 3; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- each query runs after the one before
       after.push(await outcomeOf(query()));
     }
     return [
@@ -778,7 +773,6 @@ t(
     const run = (i) =>
       db.unsafe(`select $1::int + ${i} as x`, [1], { prepare: true });
     for (let i = 0; i < 2100; i += 100) {
-      // oxlint-disable-next-line no-await-in-loop -- each hundred statements run after the hundred before
       await Promise.all(Array.from({ length: 100 }, (_, j) => run(i + j)));
     }
     const [{ n }] =
@@ -903,7 +897,6 @@ t(
     await selectLargeRows(db, refs);
 
     for (let i = 0; i < 5; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- each collection runs after a pause
       await delay(10);
       gc();
     }

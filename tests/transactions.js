@@ -343,7 +343,6 @@ t(
     });
 
     for (let x = 0; x < 10; x += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- each transaction runs after the one before
       await db.begin((tx) => tx`select 1 as x`);
     }
 
@@ -844,7 +843,6 @@ t(
     const results = [];
     for (let i = 0; i < 2; i += 1) {
       for (const begin of begins) {
-        // oxlint-disable-next-line no-await-in-loop -- each begin runs after the one before
         const commands = await Promise.all([
           begin().then(
             (x) => x.command,
@@ -899,7 +897,6 @@ t(
       (error) => error.code
     );
     for (let i = 0; i < 4; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- each insert runs after the one before
       await db`insert into test values (${i})`;
     }
     await db.end();
@@ -1048,7 +1045,6 @@ t(
       await tx`create table test (x int)`;
       let start = Date.now();
       for (let i = 0; i < 5; i += 1) {
-        // oxlint-disable-next-line no-await-in-loop -- these run one after another, to time them against the pipelined ones
         await tx`select ${i}::int`;
       }
       const sequential = Date.now() - start;
@@ -1196,12 +1192,10 @@ t(
         const query = tx`select pg_sleep(2)`.execute();
         for (;;) {
           const [{ sleeping }] =
-            // oxlint-disable-next-line no-await-in-loop -- polls until the query sleeps
             await killer`select wait_event = 'PgSleep' as sleeping from pg_stat_activity where pid = ${pid}`;
           if (sleeping) {
             break;
           }
-          // oxlint-disable-next-line no-await-in-loop -- polls until the query sleeps
           await delay(1);
         }
         await killer`select pg_terminate_backend(${pid})`;
@@ -1300,16 +1294,11 @@ t(
             })
         )
         .catch((beginError) => beginError.code);
-      // oxlint-disable-next-line no-await-in-loop -- the methods are tried one after the other
       await killer`select pg_terminate_backend(${await pid.promise})`;
-      // oxlint-disable-next-line no-await-in-loop -- the methods are tried one after the other
       const outer = await root;
       gate.resolve();
-      // oxlint-disable-next-line no-await-in-loop -- the methods are tried one after the other
       outcomes.push(`${outer} ${await child.promise}`);
-      // oxlint-disable-next-line no-await-in-loop -- the methods are tried one after the other
       await killer.end();
-      // oxlint-disable-next-line no-await-in-loop -- the methods are tried one after the other
       await db.end();
     }
     return ["57P01 57P01,57P01 57P01", outcomes.join(",")];
@@ -1401,14 +1390,12 @@ t(
     const spraying = { on: true };
     const spray = (async () => {
       while (spraying.on) {
-        // oxlint-disable-next-line no-await-in-loop -- cancels again and again until told to stop
         await other`select pg_cancel_backend(pid) from pg_stat_activity where application_name = 'begin_cancel'`;
       }
     })();
     let wrong = 0;
     let canceled = 0;
     for (let i = 0; i < 500; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- each transaction runs after the one before
       const failed = await victim
         .begin(async (tx) => {
           await tx`insert into test values (${i})`;
@@ -1419,7 +1406,6 @@ t(
           (error) => error.code === "57014" || Promise.reject(error)
         );
       const [{ n }] =
-        // oxlint-disable-next-line no-await-in-loop -- checks each transaction before the next
         await other`select count(*)::int as n from test where i = ${i}`;
       if (failed) {
         canceled += 1;

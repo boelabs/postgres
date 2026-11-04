@@ -547,7 +547,6 @@ t(
     const fresh = postgres(options);
     const seen = [];
     const batches = [];
-    // oxlint-disable-next-line unicorn/no-array-for-each -- the query's own forEach is what this tests
     await fresh`select m from test_enum_each`.forEach((row) =>
       seen.push(row.m)
     );

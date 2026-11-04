@@ -119,7 +119,6 @@ const operation = () => {
 
 const worker = async () => {
   while (Date.now() < deadline) {
-    // oxlint-disable-next-line no-await-in-loop -- a worker runs one operation after another
     await operation();
   }
 };
@@ -138,7 +137,6 @@ const fault = async () => {
 
 const faults = async () => {
   while (Date.now() < deadline) {
-    // oxlint-disable-next-line no-await-in-loop -- one fault after another
     await fault();
   }
 };
@@ -182,7 +180,6 @@ const takeSample = async () => {
 
 const sample = async () => {
   while (Date.now() < deadline) {
-    // oxlint-disable-next-line no-await-in-loop -- one sample after another
     await takeSample();
   }
 };

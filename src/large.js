@@ -48,9 +48,8 @@ export default function largeObject(
 
         return new Stream.Writable({
           highWaterMark,
-          // oxlint-disable-next-line promise/prefer-await-to-callbacks -- Node's Writable contract
           write(chunk, encoding, callback) {
-            // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch, promise/no-callback-in-promise, promise/prefer-await-to-callbacks -- Node's Writable takes a callback; then(ok, fail) calls it exactly once and runs the query now, as await would a tick later
+            // oxlint-disable-next-line promise/no-callback-in-promise -- Node's Writable takes a callback; then(ok, fail) calls it exactly once and runs the query now, as await would a tick later
             lo.write(chunk).then(() => callback(), callback);
           },
         });

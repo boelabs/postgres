@@ -11,7 +11,6 @@ t("Ensure reserve on connection throws proper error", async () => {
   const db = postgres({
     idle_timeout,
     socket: () => {
-      // oxlint-disable-next-line no-throw-literal -- the test is about a thrown value that is not an Error
       throw "wat";
     },
   });
@@ -112,9 +111,7 @@ t("reserve after a terminated query", async () => {
     return sleeping;
   };
 
-  // oxlint-disable-next-line no-await-in-loop -- polling: each check waits for the one before
   while (!(await isSleeping())) {
-    // oxlint-disable-next-line no-await-in-loop -- polling: each check waits for the one before
     await delay(1);
   }
 

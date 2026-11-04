@@ -204,7 +204,6 @@ export default {
       for (const [name, fn] of Object.entries(checks).filter(
         ([x]) => x !== "listen" && (!only || x.startsWith(only))
       )) {
-        // oxlint-disable-next-line no-await-in-loop -- the checks run one at a time
         out[`hyperdrive ${name}`] = await check(
           env.HYPERDRIVE.connectionString,
           fn
@@ -219,7 +218,6 @@ export default {
       for (const [name2, fn] of Object.entries(checks).filter(
         ([x]) => name === "trust" || everywhere.has(x)
       )) {
-        // oxlint-disable-next-line no-await-in-loop -- the checks run one at a time
         out[`${name} ${name2}`] = await check(o, fn);
       }
     }

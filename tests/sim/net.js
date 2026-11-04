@@ -57,7 +57,6 @@ export const Clock = (
       while (true) {
         const { promise, resolve } = Promise.withResolvers();
         realImmediate(resolve);
-        // oxlint-disable-next-line no-await-in-loop -- each timer runs on its own turn of the real event loop, after the microtasks of the one before
         await promise;
         same = now === at ? same + 1 : 0;
         at = now;
@@ -219,7 +218,6 @@ export const Pipe = ({ clock, random, delay = 0, split = 0 }) => {
       setNoDelay: () => x,
       unref: () => x,
       writable: true,
-      // oxlint-disable-next-line promise/prefer-await-to-callbacks -- net.Socket's write(data, encoding, callback) signature
       write(chunk, encoding, callback) {
         const cb = typeof encoding === "function" ? encoding : callback;
         if (x.destroyed || !x.writable) {

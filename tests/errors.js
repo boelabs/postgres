@@ -27,7 +27,6 @@ t("Throw syntax error", async () => {
 t("Proper handling of non object Errors", async () => {
   const db = postgres({
     socket: () => {
-      // oxlint-disable-next-line no-throw-literal -- the test is about a thrown value that is not an Error
       throw "wat";
     },
   });
@@ -38,7 +37,6 @@ t("Proper handling of non object Errors", async () => {
 t("Proper handling of null Errors", async () => {
   const db = postgres({
     socket: () => {
-      // oxlint-disable-next-line no-throw-literal -- the test is about a thrown null
       throw null;
     },
   });
@@ -79,7 +77,6 @@ const noop = () => {
 t("sql().then throws not tagged error", () => {
   let error;
   try {
-    // oxlint-disable-next-line promise/catch-or-return -- then throws before there is a promise, which is what is tested
     sql("select 1").then(noop);
   } catch (callError) {
     error = callError.code;
@@ -100,7 +97,6 @@ t("sql().catch throws not tagged error", () => {
 t("sql().finally throws not tagged error", () => {
   let error;
   try {
-    // oxlint-disable-next-line promise/catch-or-return -- finally throws before there is a promise, which is what is tested
     sql("select 1").finally(noop);
   } catch (callError) {
     error = callError.code;
@@ -377,7 +373,6 @@ t(
     await holding(refs);
 
     for (let i = 0; i < 5; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- each collection runs after a pause
       await delay(10);
       gc();
     }

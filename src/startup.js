@@ -385,7 +385,6 @@ const attempt = (options, host, port, signal) => {
         options.connect_timeout * 1000
       );
 
-    // oxlint-disable-next-line promise/catch-or-return, promise/prefer-catch -- then(ok, fail) settles on session's own tick, and a throw in ok must not reach fail
     session().then(accept, refuse);
   } catch (error) {
     reject(error);
@@ -427,7 +426,6 @@ const traced = (options, host, port, signal) => {
       });
       return ready;
     },
-    // oxlint-disable-next-line promise/prefer-await-to-callbacks -- awaiting would settle the attempt on later ticks
     (error) => {
       finish(channels.connect, context, error);
       throw error;
@@ -448,7 +446,6 @@ export const open = async (options, signal = unsignalled(), first = 0) => {
       const i = (first + n) % hosts.length;
       const host = hosts[i];
       const port = options.port[i] || options.port[0];
-      // oxlint-disable-next-line no-await-in-loop -- the hosts are tried one at a time, in order
       const [failed, error, ready] = await traced(
         options,
         host,

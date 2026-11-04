@@ -469,7 +469,6 @@ t(
     const statuses = [];
     for (const channel_binding of ["disable", "prefer"]) {
       for (const ssl of [false, "require"]) {
-        // oxlint-disable-next-line no-await-in-loop -- one connection after another, as the test intends
         const { status } = await session({
           ...login_scram,
           channel_binding,
@@ -494,13 +493,11 @@ t(
   async () => {
     const codes = [];
     for (const length of [-1, 0, 3, 0x40_00_00_01]) {
-      // oxlint-disable-next-line no-await-in-loop -- one fake server after another, each closed before the next
       const x = await fake(
         (socket, type) =>
           type === "startup" &&
           socket.write(Buffer.concat([header("R", length), Buffer.alloc(8)]))
       );
-      // oxlint-disable-next-line no-await-in-loop -- one fake server after another, each closed before the next
       const code = await session({ port: [x.address().port] }).catch(
         (error) => error.code
       );
@@ -550,7 +547,6 @@ t(
     const received = [];
     const codes = [];
     for (const kind of [3, 5]) {
-      // oxlint-disable-next-line no-await-in-loop -- one fake server after another, each closed before the next
       const x = await fake((socket, type) => {
         if (type === "startup") {
           socket.write(
@@ -564,7 +560,6 @@ t(
           received.push(kind);
         }
       });
-      // oxlint-disable-next-line no-await-in-loop -- one fake server after another, each closed before the next
       const code = await session({
         channel_binding: "require",
         pass: "secret",
