@@ -1,0 +1,5 @@
+# Ultracite ships its agent skill; the one in .agents/skills is pinned by skills-lock.json, so pnpm
+# does not install a second copy.
+permissions:
+  ultracite:
+    skills: false

@@ -24,9 +24,9 @@ A guide for coding agents in this repository. People start with [README.md](READ
 Run before every pull request, as CI does:
 
 ```bash
-npm run check
-npm run test:types
-npm run test:docker
+pnpm run check
+pnpm run test:types
+pnpm run test:docker
 sh tests/docker/run.sh sh -c 'bun tests/unit/index.js && bun tests/index.js'
 ```
 

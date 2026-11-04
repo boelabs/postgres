@@ -47,7 +47,7 @@
     "check:docs": "node scripts/check-docs.js",
     "coverage": "node tests/coverage.js",
     "fix": "ultracite fix",
-    "prepublishOnly": "npm run check && npm run test:types && npm run test:unit",
+    "prepublishOnly": "pnpm run check && pnpm run test:types && pnpm run test:unit",
     "test": "node tests/unit && node tests/index.js && node tests/simulate.js",
     "test:bun": "bun tests/unit/index.js && bun tests/index.js && bun tests/simulate.js",
     "test:cf": "sh tests/cf/run.sh",
@@ -66,5 +66,6 @@
   },
   "engines": {
     "node": ">=24"
-  }
+  },
+  "packageManager": "pnpm@12.16.1"
 }
