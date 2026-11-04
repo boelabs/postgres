@@ -81,8 +81,7 @@ t("Recreate prepared statements on RevalidateCachedQuery error", async () => {
 });
 
 const updateJsonConfig = () =>
-  // oxlint-disable-next-line sort-keys -- the JSON text sent keeps the key order it had
-  sql`update test set config = ${sql.json({ warmup: 2_100_000_000, ticksLimit: 5000 })} returning *`;
+  sql`update test set config = ${sql.json({ ticksLimit: 5000, warmup: 2_100_000_000 })} returning *`;
 
 t(
   "Does not re-serialize json parameters when retrying on RevalidateCachedQuery error",

@@ -44,7 +44,6 @@ t("Unsafe cursor", async () => {
 
 t("Cursor custom n", async () => {
   const order = [];
-  // oxlint-disable-next-line require-await -- the cursor is given a promise to wait on, as before
   await sql`select * from generate_series(1,20)`.cursor(10, async (x) => {
     order.push(x.length);
   });
@@ -53,7 +52,6 @@ t("Cursor custom n", async () => {
 
 t("Cursor custom with rest n", async () => {
   const order = [];
-  // oxlint-disable-next-line require-await -- the cursor is given a promise to wait on, as before
   await sql`select * from generate_series(1,20)`.cursor(11, async (x) => {
     order.push(x.length);
   });
@@ -62,7 +60,6 @@ t("Cursor custom with rest n", async () => {
 
 t("Cursor custom with less results than batch size", async () => {
   const order = [];
-  // oxlint-disable-next-line require-await -- the cursor is given a promise to wait on, as before
   await sql`select * from generate_series(1,20)`.cursor(21, async (x) => {
     order.push(x.length);
   });
@@ -72,7 +69,6 @@ t("Cursor custom with less results than batch size", async () => {
 t("Cursor cancel", async () => {
   let result;
   await sql`select * from generate_series(1,10) as x`.cursor(
-    // oxlint-disable-next-line require-await -- CLOSE comes back in a promise, as before
     async ([{ x }]) => {
       result = x;
       return sql.CLOSE;

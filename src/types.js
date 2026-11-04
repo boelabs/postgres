@@ -21,8 +21,8 @@ const literal = (x) =>
   (Object.getPrototypeOf(x) === Object.prototype ||
     Object.getPrototypeOf(x) === null);
 
-// oxlint-disable-next-line unicorn/prefer-spread -- a type's from is one oid or name or an array of them: concat takes both, a spread only the array
-const listOf = (from) => [].concat(from || []);
+// A type's from is one oid or name, or an array of them.
+const listOf = (from) => [from || []].flat();
 
 const arrays = {
   1033: 1034,

@@ -123,16 +123,15 @@ t("CopyData and CopyFail", () => [
 t("Startup has no type byte and ends with an empty name", () => {
   const body = Buffer.concat([
     i32(196_608),
-    str("user"),
-    str("u"),
     str("database"),
     str("d"),
+    str("user"),
+    str("u"),
     Buffer.from([0]),
   ]);
   return [
     hex(Buffer.concat([i32(body.length + 4), body])),
-    // oxlint-disable-next-line eslint/sort-keys -- Startup writes the parameters in this order, as the expected bytes are
-    hex(p.Startup({ user: "u", database: "d" })),
+    hex(p.Startup({ database: "d", user: "u" })),
   ];
 });
 
@@ -401,8 +400,8 @@ t(
     };
     let message;
     try {
-      // oxlint-disable-next-line eslint/sort-keys -- Startup writes user before the failing value, which is what is left behind
-      p.Startup({ user: "a", database: bad });
+      // A parameter is written before the one that fails.
+      p.Startup({ database: "a", user: bad });
     } catch (error) {
       ({ message } = error);
     }

@@ -108,8 +108,7 @@ t("subscribe reconnects and calls onsubscribe", { timeout: 10 }, async () => {
 
   const result = [];
   const errors = [];
-  // oxlint-disable-next-line sort-keys -- the order the timeout message shows the state in
-  const state = () => JSON.stringify({ onsubscribes, result, errors });
+  const state = () => JSON.stringify({ errors, onsubscribes, result });
   let onsubscribes = 0;
 
   const { unsubscribe, sql: subscribeSql } = await sql.subscribe(
@@ -264,7 +263,6 @@ t(
 
     await sub.subscribe(
       "insert:test",
-      // oxlint-disable-next-line require-await -- the handler fails with a rejected promise, as an async handler does
       async (row) => {
         seen.push(row.name);
         if (row.name === "a") {
@@ -647,8 +645,7 @@ t(
     await until(
       () => seen.length && errors.length,
       20_000,
-      // oxlint-disable-next-line sort-keys -- the order the timeout message shows the state in
-      () => JSON.stringify({ seen, errors })
+      () => JSON.stringify({ errors, seen })
     );
     await sub.end();
     return [

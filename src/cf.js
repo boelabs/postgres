@@ -65,7 +65,6 @@ const sslRequest = Buffer.from([0, 0, 0, 8, 4, 210, 22, 47]);
 const chunk = 16_384;
 
 const Stream = (raw, secure, host, port) => {
-  // oxlint-disable-next-line unicorn/prefer-event-target -- the connection drives this like a node:net socket, with on() and emit()
   const x = new EventEmitter();
   const writer = raw.writable.getWriter();
   const reader = raw.readable.getReader();

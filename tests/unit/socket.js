@@ -4,7 +4,6 @@ import { Socket } from "../../src/socket.js";
 import { t } from "../test.js";
 
 const fake = () => {
-  // oxlint-disable-next-line unicorn/prefer-event-target -- it stands in for a Node socket, which is an EventEmitter
   const x = new EventEmitter();
   x.written = [];
   x.write = (data) => {
@@ -46,7 +45,6 @@ t("Socket closes once with the error that came before", async () => {
   const raw = fake();
   const socket = await Socket({ socket: () => raw });
   const closes = [];
-  // oxlint-disable-next-line unicorn/prefer-add-event-listener -- onclose is the callback property of the library's Socket, not a DOM event handler
   socket.onclose = (x) => closes.push(x && x.code);
   raw.emit("error", Object.assign(new Error("reset"), { code: "ECONNRESET" }));
   raw.emit("close", true);

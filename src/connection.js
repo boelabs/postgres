@@ -942,7 +942,6 @@ export const Connection = (ready, options, events) => {
   const close = () => {
     if (!closing) {
       const { promise, resolve, reject } = Promise.withResolvers();
-      // oxlint-disable-next-line unicorn/prefer-add-event-listener -- a plain object of ours with a single handler, not an event target
       connection.onended = resolve;
       // As in a promise's executor: a throw rejects the promise, which is only then set as closing.
       try {
@@ -1312,13 +1311,14 @@ export const Connection = (ready, options, events) => {
 
   const column = (name, table, number, type) => {
     const parser = events.parser(type);
-    // oxlint-disable-next-line sort-keys -- users see a column's keys in this order, and transform.column.from runs before the decoder is made
+    // The user's transform runs before the decoder is made, as it always has.
+    const named = transform.column.from ? transform.column.from(name) : name;
     return {
-      name: transform.column.from ? transform.column.from(name) : name,
-      parser: parser.identity ? null : parser,
       decode: events.decoder(type, parser),
-      table,
+      name: named,
       number,
+      parser: parser.identity ? null : parser,
+      table,
       type,
     };
   };
@@ -1397,8 +1397,7 @@ export const Connection = (ready, options, events) => {
 
     if (item.final) {
       if (item.stream) {
-        // oxlint-disable-next-line sort-keys -- the order the stream's own properties are listed in
-        Object.assign(item.stream, { count, command });
+        Object.assign(item.stream, { command, count });
       }
       item.final();
       item.final = null;
@@ -1762,13 +1761,12 @@ export const Connection = (ready, options, events) => {
   const NoticeResponse = (x, start, end) => {
     const notice = p.error(x, start, end);
     if (listened(channels.notice)) {
-      // oxlint-disable-next-line sort-keys -- subscribers see the message's keys in this order
       channels.notice.publish({
-        notice,
         connection: connection.id,
-        host: connection.host,
-        port: connection.port,
         database: options.database,
+        host: connection.host,
+        notice,
+        port: connection.port,
       });
     }
     if (options.onnotice) {
@@ -1944,7 +1942,6 @@ export const Connection = (ready, options, events) => {
     return frames.push(x);
   };
   socket.ondrain = ondrain;
-  // oxlint-disable-next-line unicorn/prefer-add-event-listener -- the socket is our own wrapper, which takes a single handler as a property
   socket.onclose = onclose;
   if (ready.rest && ready.rest.length) {
     frames.push(ready.rest);

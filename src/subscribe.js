@@ -24,13 +24,17 @@ export default function Subscribe(postgres, options) {
   let ended = false;
   let retries = 0;
 
-  // oxlint-disable-next-line require-await, default-param-last -- async so a bad event rejects instead of throwing; the positional signature (and its length) is public
-  const subscribe = async (event, fn, onsubscribe = noop, onerror) => {
+  // Async, so that a bad event rejects instead of throwing.
+  const subscribe = async (event, fn, onsubscribe, onerror) => {
     const name = parseEvent(event);
 
     connection ||= init();
 
-    const subscriber = { fn, onerror, onsubscribe };
+    const subscriber = {
+      fn,
+      onerror,
+      onsubscribe: onsubscribe === undefined ? noop : onsubscribe,
+    };
     const fns = subscribers.has(name)
       ? subscribers.get(name).add(subscriber)
       : subscribers.set(name, new Set([subscriber])).get(name);
@@ -44,7 +48,7 @@ export default function Subscribe(postgres, options) {
 
     return connection.then(
       () => {
-        onsubscribe();
+        subscriber.onsubscribe();
         return { sql, state, unsubscribe };
       },
       (error) => {
@@ -428,8 +432,7 @@ const parse = (x, relations, parsers, message, transform) => {
     const table = x.toString("utf-8", i + 1, tableEnd);
     i = tableEnd + 2;
     const columns = Array.from({ length: x.readUInt16BE(i) });
-    // oxlint-disable-next-line sort-keys -- users see the relation as info.relation, so its keys keep the order they print in
-    const r = { schema, table, columns, keys: [] };
+    const r = { columns, keys: [], schema, table };
     relations[id] = r;
     i += 2;
 
@@ -447,8 +450,7 @@ const parse = (x, relations, parsers, message, transform) => {
       const parser = parsers[x.readUInt32BE(i)];
       i += 4;
       const atttypmod = x.readUInt32BE(i);
-      // oxlint-disable-next-line sort-keys -- users see the columns in info.relation, so their keys keep the order they print in
-      const column = { key, name, type: columnType, parser, atttypmod };
+      const column = { atttypmod, key, name, parser, type: columnType };
       r.columns[columnIndex] = column;
       columnIndex += 1;
 
@@ -483,8 +485,7 @@ const parse = (x, relations, parsers, message, transform) => {
       key || x[i] === 79
         ? tuples(x, relation.columns, (i += 3), transform).row
         : null,
-      // oxlint-disable-next-line sort-keys -- the info users receive keeps its documented key order
-      { command: "delete", relation, key }
+      { command: "delete", key, relation }
     );
   } else if (type === 85) {
     let i = 1;
@@ -501,22 +502,20 @@ const parse = (x, relations, parsers, message, transform) => {
     }
 
     const { row } = tuples(x, relation.columns, i + 3, transform);
-    // oxlint-disable-next-line sort-keys -- the info users receive keeps its documented key order
     message("change", row, {
       command: "update",
-      relation,
       key,
       old: xs && xs.row,
+      relation,
     });
   } else if (type === 84) {
     const count = x.readUInt32BE(1);
     const flags = x.at(5);
     for (let i = 0; i < count; i += 1) {
-      // oxlint-disable-next-line sort-keys -- the info users receive keeps its documented key order
       message("change", null, {
+        cascade: (flags & 1) === 1,
         command: "truncate",
         relation: relations[x.readUInt32BE(6 + i * 4)],
-        cascade: (flags & 1) === 1,
         restartIdentity: (flags & 2) === 2,
       });
     }

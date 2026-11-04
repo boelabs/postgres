@@ -117,7 +117,6 @@ export const Pipe = ({ clock, random, delay = 0, split = 0 }) => {
   };
 
   const end = () => {
-    // oxlint-disable-next-line unicorn/prefer-event-target -- it stands in for a net.Socket, which is an EventEmitter
     const x = new EventEmitter();
     let last = 0;
     let paused = false;

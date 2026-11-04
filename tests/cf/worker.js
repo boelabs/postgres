@@ -11,16 +11,14 @@ const base = {
   user: "postgres_js_test",
 };
 
-// oxlint-disable-next-line sort-keys -- the configurations run and report in this order (Object.entries)
 const configs = {
-  trust: base,
+  direct: { ...base, ssl: "require", sslnegotiation: "direct" },
   md5: { ...base, pass: "postgres_js_test_md5", user: "postgres_js_test_md5" },
   scram: {
     ...base,
     pass: "postgres_js_test_scram",
     user: "postgres_js_test_scram",
   },
-  tls: { ...base, host: "localhost", ssl: "require" },
   scramtls: {
     ...base,
     host: "localhost",
@@ -28,14 +26,55 @@ const configs = {
     ssl: "require",
     user: "postgres_js_test_scram",
   },
-  direct: { ...base, ssl: "require", sslnegotiation: "direct" },
+  tls: { ...base, host: "localhost", ssl: "require" },
+  trust: base,
 };
 
-// oxlint-disable-next-line sort-keys -- the checks run and report in this order (Object.entries)
 const checks = {
-  select: async (sql) => {
-    const [row] = await sql`select 1 as x`;
-    return row.x === 1;
+  async begin(sql) {
+    const [x] = await sql.begin(async (tx) => {
+      await tx`create temp table t (x int)`;
+      await tx`insert into t values (1)`;
+      return tx`select count(*)::int as c from t`;
+    });
+    return x.c === 1;
+  },
+  async cancel(sql) {
+    const q = sql`select pg_sleep(2)`;
+    setTimeout(() => q.cancel(), 200);
+    return (await q.catch((error) => error.code)) === "57014";
+  },
+  async copy(sql) {
+    let bytes = 0;
+    for await (const x of await sql`copy (select generate_series(1, 10000)) to stdout`.readable()) {
+      bytes += x.length;
+    }
+    return bytes === 48_894;
+  },
+  async cursor(sql) {
+    let n = 0;
+    await sql`select generate_series(1, 1000) as x`.cursor(
+      100,
+      (rows) => (n += rows.length)
+    );
+    return n === 1000;
+  },
+  error: async (sql) =>
+    (await sql`select wat`.catch((error) => error.code)) === "42703",
+  async large(sql) {
+    const text = "x".repeat(300_000);
+    const [x] = await sql`select length(${text}) as n`;
+    const [y] = await sql.begin((tx) => tx`select length(${text}) as n`);
+    return x.n === 300_000 && y.n === 300_000;
+  },
+  async listen(sql) {
+    let got;
+    await sql.listen("cf", (x) => (got = x));
+    await sql.notify("cf", "hi");
+    const waited = Promise.withResolvers();
+    setTimeout(waited.resolve, 200);
+    await waited.promise;
+    return got === "hi";
   },
   async params(sql) {
     const [x] = await sql`
@@ -53,51 +92,24 @@ const checks = {
     );
     return xs.every((x, i) => x[0].i === i);
   },
-  async large(sql) {
-    const text = "x".repeat(300_000);
-    const [x] = await sql`select length(${text}) as n`;
-    const [y] = await sql.begin((tx) => tx`select length(${text}) as n`);
-    return x.n === 300_000 && y.n === 300_000;
+  async prepared(sql) {
+    const xs = await Promise.all(
+      Array.from(
+        { length: 50 },
+        (_, i) => sql`select ${i}::int as i, ${`x${i}`} as s`
+      )
+    );
+    return xs.every((x, i) => x[0].i === i && x[0].s === `x${i}`);
   },
   rows: async (sql) => {
     const { length } =
       await sql`select generate_series(1, 100000) as n, md5(random()::text) as m`;
     return length === 100_000;
   },
-  async begin(sql) {
-    const [x] = await sql.begin(async (tx) => {
-      await tx`create temp table t (x int)`;
-      await tx`insert into t values (1)`;
-      return tx`select count(*)::int as c from t`;
-    });
-    return x.c === 1;
+  select: async (sql) => {
+    const [row] = await sql`select 1 as x`;
+    return row.x === 1;
   },
-  async cursor(sql) {
-    let n = 0;
-    await sql`select generate_series(1, 1000) as x`.cursor(
-      100,
-      (rows) => (n += rows.length)
-    );
-    return n === 1000;
-  },
-  async copy(sql) {
-    let bytes = 0;
-    for await (const x of await sql`copy (select generate_series(1, 10000)) to stdout`.readable()) {
-      bytes += x.length;
-    }
-    return bytes === 48_894;
-  },
-  async listen(sql) {
-    let got;
-    await sql.listen("cf", (x) => (got = x));
-    await sql.notify("cf", "hi");
-    const waited = Promise.withResolvers();
-    setTimeout(waited.resolve, 200);
-    await waited.promise;
-    return got === "hi";
-  },
-  error: async (sql) =>
-    (await sql`select wat`.catch((error) => error.code)) === "42703",
   async tracing(sql) {
     const seen = [];
     const channel = dc.tracingChannel("postgres:query");
@@ -124,15 +136,6 @@ const checks = {
     }
     return seen.join(",") === "SELECT:select $1::int as x";
   },
-  async prepared(sql) {
-    const xs = await Promise.all(
-      Array.from(
-        { length: 50 },
-        (_, i) => sql`select ${i}::int as i, ${`x${i}`} as s`
-      )
-    );
-    return xs.every((x, i) => x[0].i === i && x[0].s === `x${i}`);
-  },
   async unnamed(sql) {
     const xs = await Promise.all(
       Array.from({ length: 20 }, (_, i) =>
@@ -140,11 +143,6 @@ const checks = {
       )
     );
     return xs.every((x, i) => x[0].i === i);
-  },
-  async cancel(sql) {
-    const q = sql`select pg_sleep(2)`;
-    setTimeout(() => q.cancel(), 200);
-    return (await q.catch((error) => error.code)) === "57014";
   },
 };
 
@@ -195,8 +193,7 @@ export default {
     if (url.pathname === "/hyperdrive") {
       if (!env.HYPERDRIVE) {
         return Response.json(
-          // oxlint-disable-next-line sort-keys -- the JSON response lists failed first, as the report does
-          { failed: 1, error: "No HYPERDRIVE binding" },
+          { error: "No HYPERDRIVE binding", failed: 1 },
           { status: 500 }
         );
       }

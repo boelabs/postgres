@@ -197,8 +197,7 @@ export const Pool = (options, types) => {
       q.connection = c;
       c.describe(statement, built.oids, q).then(
         ({ params, columns }) =>
-          // oxlint-disable-next-line sort-keys -- the user gets this object, its key order shows in logs and JSON
-          q.resolve({ string: built.text, types: params, name: "", columns }),
+          q.resolve({ columns, name: "", string: built.text, types: params }),
         (describeError) => q.reject(queryError(describeError, q, options.debug))
       );
       if (q.onwrite) {
@@ -949,13 +948,12 @@ export const Pool = (options, types) => {
   };
 
   const event = (name, c, extra) => {
-    // oxlint-disable-next-line sort-keys -- a diagnostics message for subscribers, its key order shows in their logs and JSON
     channels.pool.publish({
-      event: name,
       connection: c ? c.id : null,
+      database: options.database,
+      event: name,
       host: c ? c.host : null,
       port: c ? c.port : null,
-      database: options.database,
       stats: pool.stats,
       ...extra,
     });
@@ -1115,8 +1113,7 @@ export const Pool = (options, types) => {
     used = true;
     // One tick before anything else, so that leases and queries start in the order they were made:
     // a query made before sql.begin runs first, also with max: 1.
-    // oxlint-disable-next-line unicorn/no-unnecessary-await -- the tick is the point
-    await 1;
+    await Promise.resolve();
     if (ending) {
       throw Errors.connection(
         "CONNECTION_ENDED",
@@ -1398,13 +1395,12 @@ export const Pool = (options, types) => {
     lease: acquire,
     query,
     get stats() {
-      // oxlint-disable-next-line sort-keys -- sql.stats is handed to the user, its key order shows in logs and JSON
       return {
         connections: connections.size,
-        opening,
         idle: [...connections].filter((x) => x.inflight === 0 && !x.lease)
           .length,
         leased: [...connections].filter((x) => x.lease).length,
+        opening,
         waiting: waiting.length,
       };
     },

@@ -1,4 +1,3 @@
-// oxlint-disable-next-line max-classes-per-file -- the published types: PostgresError is a class users construct and check with instanceof, NotAPromise a brand
 import type { Readable, Writable } from "node:stream";
 import type { ConnectionOptions as TlsOptions } from "node:tls";
 
@@ -22,7 +21,6 @@ declare const PRIVATE: unique symbol;
 declare class NotAPromise {
   private [PRIVATE]: never;
   /** @deprecated Not a query, and so not a promise: use the tagged template, ```await sql`...` ``` */
-  // oxlint-disable-next-line unicorn/no-thenable -- marks a helper as not a promise, so that awaiting one is flagged
   private then(): never;
   /** @deprecated Not a query, and so not a promise: use the tagged template, ```await sql`...` ``` */
   private catch(): never;
@@ -524,7 +522,6 @@ declare namespace postgres {
   }
 
   interface Notice {
-    // oxlint-disable-next-line typescript/consistent-indexed-object-style -- an interface, which users can augment
     [field: string]: string;
   }
 
@@ -703,7 +700,6 @@ declare namespace postgres {
     | object;
 
   interface Row {
-    // oxlint-disable-next-line typescript/consistent-indexed-object-style -- an interface, which users can augment
     [column: string]: any;
   }
 
@@ -800,7 +796,6 @@ declare namespace postgres {
     ): Promise<ExecutionResult<TRow[number]>>;
   }
 
-  // oxlint-disable-next-line typescript/no-empty-interface -- a named interface users see in their types and can augment
   interface PendingDescribeQuery extends Promise<Statement> {}
 
   interface PendingValuesQuery<TRow extends readonly MaybeRow[]>
@@ -831,10 +826,8 @@ declare namespace postgres {
     readonly parameters: any[];
   }
 
-  // oxlint-disable-next-line typescript/no-empty-interface -- a named interface users see in their types and can augment
   interface PendingRequest extends Promise<[] & ResultMeta<null>> {}
 
-  // oxlint-disable-next-line typescript/no-empty-interface -- a named interface users see in their types and can augment
   interface ListenRequest extends Promise<ListenMeta> {}
   interface ListenMeta {
     state: State;
@@ -1143,7 +1136,6 @@ export type Parameter<T = postgres.SerializableParameter> =
 export type PostgresType<T = any> = postgres.PostgresType<T>;
 export type ReplicationEvent = postgres.ReplicationEvent;
 export type Notice = postgres.Notice;
-// oxlint-disable-next-line no-redeclare -- the class as a value and as a type, as a class declaration would give
 export declare const PostgresError: typeof postgres.PostgresError;
 export type PostgresError = postgres.PostgresError;
 /** What Sql, TransactionSql and ReservedSql have in common: take this to accept any of them */

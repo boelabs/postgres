@@ -30,13 +30,7 @@ await sql.listen("soak", () => {
   notified += 1;
 });
 
-// oxlint-disable-next-line sort-keys -- operations take turns in this order (Object.keys below)
 const kinds = {
-  select: () => sql`select ${next}::int as x`,
-  shape: () => sql.unsafe(`select $1::int as x_${next % 500}`, [next]),
-  rows: () => sql`select generate_series(1, 2000) as n`,
-  insert: () =>
-    sql`insert into soak (x, s) values (${next}, ${"x".repeat(next % 100)})`,
   begin: () =>
     sql
       .begin(async (tx) => {
@@ -52,21 +46,6 @@ const kinds = {
             beginError.code
           ) || Promise.reject(beginError)
       ),
-  cursor: async () => {
-    for await (const _rows of sql`select generate_series(1, 300) as n`.cursor(
-      50
-    )) {
-      // Read every batch, nothing more.
-    }
-  },
-  copy: async () => {
-    let bytes = 0;
-    for await (const x of await sql`copy (select generate_series(1, 5000)) to stdout`.readable()) {
-      bytes += x.length;
-    }
-    return bytes;
-  },
-  notify: () => sql.notify("soak", `x${next}`),
   cancel: () => {
     const q = sql`select pg_sleep(0.2)`;
     setTimeout(() => q.cancel().catch(noop), Math.random() * 100);
@@ -75,6 +54,23 @@ const kinds = {
         cancelError.code === "57014" || Promise.reject(cancelError)
     );
   },
+  copy: async () => {
+    let bytes = 0;
+    for await (const x of await sql`copy (select generate_series(1, 5000)) to stdout`.readable()) {
+      bytes += x.length;
+    }
+    return bytes;
+  },
+  cursor: async () => {
+    for await (const _rows of sql`select generate_series(1, 300) as n`.cursor(
+      50
+    )) {
+      // Read every batch, nothing more.
+    }
+  },
+  insert: () =>
+    sql`insert into soak (x, s) values (${next}, ${"x".repeat(next % 100)})`,
+  notify: () => sql.notify("soak", `x${next}`),
   reserve: async () => {
     const reserved = await sql.reserve();
     try {
@@ -83,6 +79,9 @@ const kinds = {
       reserved.release();
     }
   },
+  rows: () => sql`select generate_series(1, 2000) as n`,
+  select: () => sql`select ${next}::int as x`,
+  shape: () => sql.unsafe(`select $1::int as x_${next % 500}`, [next]),
 };
 
 const expected = new Set([
@@ -102,8 +101,7 @@ const operation = () => {
   const names = Object.keys(kinds);
   const name = names[id % names.length];
   const at = Date.now();
-  // oxlint-disable-next-line sort-keys -- printed with JSON.stringify in the report, name first
-  pending.set(id, { name, at });
+  pending.set(id, { at, name });
   return Promise.resolve()
     .then(kinds[name])
     .then(

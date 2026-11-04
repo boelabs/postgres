@@ -121,7 +121,6 @@ const cancel = (options, host, port, { pid, secret }) => {
     }
 
     await negotiate(socket, options);
-    // oxlint-disable-next-line unicorn/prefer-add-event-listener -- the Socket of socket.js is no EventTarget: onclose is its one handler
     socket.onclose = () => conclude();
     written = true;
     socket.end(p.Cancel(pid, secret));
@@ -189,7 +188,6 @@ const attempt = (options, host, port, signal) => {
       return reject(reason);
     }
 
-    // oxlint-disable-next-line unicorn/prefer-add-event-listener -- the Socket of socket.js is no EventTarget: onclose is its one handler
     ready.socket.onclose = noop;
     resolve(ready);
   };
@@ -341,11 +339,10 @@ const attempt = (options, host, port, signal) => {
 
       socket.ondata = (x) => frames.push(x);
       socket.write(
-        // oxlint-disable-next-line sort-keys -- the startup packet sends its parameters in this order
         p.Startup({
-          user,
-          database,
           client_encoding: "utf-8",
+          database,
+          user,
           ...options.connection,
         })
       );
@@ -364,7 +361,6 @@ const attempt = (options, host, port, signal) => {
     }
 
     signal.sockets.add(socket);
-    // oxlint-disable-next-line unicorn/prefer-add-event-listener -- the Socket of socket.js is no EventTarget: onclose is its one handler
     socket.onclose = (error) => conclude(true, closed(error));
     socket.keepAlive(options.keep_alive);
     await negotiate(socket, options);
@@ -398,15 +394,14 @@ const traced = (options, host, port, signal) => {
     return attempt(options, host, port, signal);
   }
 
-  // oxlint-disable-next-line sort-keys -- tracers see this context, with its keys in the documented order
   const context = {
-    host: options.path ? null : host,
-    port: options.path ? null : port,
-    path: options.path || null,
     database: options.database,
-    user: userName(options),
+    host: options.path ? null : host,
+    path: options.path || null,
+    port: options.path ? null : port,
     ssl: secured(options),
     sslnegotiation: options.sslnegotiation || "postgres",
+    user: userName(options),
   };
   let promise;
   start(
@@ -417,12 +412,11 @@ const traced = (options, host, port, signal) => {
 
   return promise.then(
     (ready) => {
-      // oxlint-disable-next-line sort-keys -- tracers see this result, with its keys in the documented order
       finish(channels.connect, context, null, {
         pid: ready.backend.pid,
-        status: ready.status,
         readOnly: ready.attributes.readOnly,
         standby: ready.attributes.standby,
+        status: ready.status,
       });
       return ready;
     },

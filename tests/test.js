@@ -72,8 +72,7 @@ const test = async (o, name, options, fn) => {
   const line = at ? `${at.groups.file}:${at.groups.line}` : "?";
 
   // Wait a tick, so every test of a file is registered before the first one runs.
-  // oxlint-disable-next-line unicorn/no-unnecessary-await -- the tick is the point
-  await 1;
+  await Promise.resolve();
 
   if (only && !o) {
     return;
@@ -87,7 +86,6 @@ const test = async (o, name, options, fn) => {
   const x = { fn: body, line, name };
   tests[`${line} ${name}`] = x;
   promise = promise
-    // oxlint-disable-next-line require-await -- an async callback keeps the ticks between tests as they were
     .then(async () => {
       current = x;
       const timeout = Promise.withResolvers();

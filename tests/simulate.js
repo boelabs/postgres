@@ -15,9 +15,9 @@ const { default: postgres } = await import(
     : path.resolve(modulePath)
 );
 
-// oxlint-disable-next-line sort-keys -- a seed picks its scenario by position in Object.keys, so the order is what makes a seed reproduce
 const scenarios = {
-  split: { faults: [] },
+  close: { faults: ["close", "reset"] },
+  commit: { faults: ["commitRollback"], kinds: ["begin", "query"] },
   errors: {
     faults: [],
     kinds: [
@@ -31,12 +31,6 @@ const scenarios = {
       "batch",
     ],
   },
-  close: { faults: ["close", "reset"] },
-  terminate: { faults: ["kill"] },
-  stale: { faults: ["stale", "deallocate"] },
-  shapes: { faults: ["retype"] },
-  commit: { faults: ["commitRollback"], kinds: ["begin", "query"] },
-  startup: { faults: ["outage"] },
   mixed: {
     faults: [
       "kill",
@@ -49,6 +43,11 @@ const scenarios = {
       "outage",
     ],
   },
+  shapes: { faults: ["retype"] },
+  split: { faults: [] },
+  stale: { faults: ["stale", "deallocate"] },
+  startup: { faults: ["outage"] },
+  terminate: { faults: ["kill"] },
 };
 
 const batchQuery = (db, part, id, scope, k) => {
@@ -97,15 +96,14 @@ const simulate = async (seed) => {
     violations.push(`uncaught in a timer: ${(e && e.stack) || e}`)
   );
   const clients = [];
-  // oxlint-disable-next-line sort-keys -- the values are drawn from the seed's random numbers in this order, and the trace prints them in it
   const config = {
-    max: random.pick([1, 2, 3, 5]),
-    prepare: random.chance(0.8),
     delay: random.pick([0, 1, 5, 20]),
-    split: random.pick([0, 0.2, 0.8]),
-    scenario: name,
     faults: scenario.faults.length ? random.pick([2, 6, 15]) : 0,
+    max: random.pick([1, 2, 3, 5]),
     ops: random.int(5, 60),
+    prepare: random.chance(0.8),
+    scenario: name,
+    split: random.pick([0, 0.2, 0.8]),
   };
   const wire = single && process.env.WIRE && ((x) => log(`wire ${x}`));
   const server = Server({

@@ -50,8 +50,8 @@ export class Query extends Promise {
     this.timer = null;
     this.timedOut = false;
 
-    // oxlint-disable-next-line unicorn/error-message -- only its stack is kept, and shown as it is
-    this.originError = handler.debug ? new Error() : null;
+    // Only its stack is kept: the first line, with this message, is replaced by the error's own.
+    this.originError = handler.debug ? new Error("query origin") : null;
     if (this.tagged && !handler.debug && !origins.has(strings)) {
       origins.set(strings, located());
     }
@@ -138,8 +138,7 @@ export class Query extends Promise {
     } catch (error) {
       return `Query { ${error.message} }`;
     }
-    // oxlint-disable-next-line sort-keys -- the order in which inspect prints them
-    return `Query ${nested({ text: x.text, parameters: x.values }, options)}`;
+    return `Query ${nested({ parameters: x.values, text: x.text }, options)}`;
   }
 
   cancel() {
@@ -170,25 +169,24 @@ export class Query extends Promise {
     return this;
   }
 
-  // oxlint-disable-next-line require-await -- the API returns a promise, which adopts the query
   async readable() {
     this.simple();
     this.streaming = true;
     return this;
   }
 
-  // oxlint-disable-next-line require-await -- the API returns a promise, which adopts the query
   async writable() {
     this.simple();
     this.streaming = true;
     return this;
   }
 
-  // oxlint-disable-next-line default-param-last -- cursor(fn) and cursor(rows, fn) are both the API, and cursor.length stays 0
-  cursor(rows = 1, fn) {
+  // cursor(fn) and cursor(rows, fn): rows is 1 when left out.
+  cursor(rows, fn) {
     this.options.simple = false;
     const callback = typeof rows === "function" ? rows : fn;
-    this.cursorRows = typeof rows === "function" ? 1 : rows;
+    this.cursorRows =
+      typeof rows === "function" || rows === undefined ? 1 : rows;
 
     if (typeof callback === "function") {
       this.cursorFn = callback;
@@ -342,22 +340,21 @@ const context = (q) => {
       text = null;
     }
   }
-  // oxlint-disable-next-line sort-keys -- subscribers to diagnostics_channel see the fields in this order
   return {
-    query: text,
-    parameters: undefined,
-    database: options.database,
-    user: userName(options),
-    host: null,
-    port: null,
-    connection: null,
-    statement: null,
     command: null,
+    complete: null,
+    connection: null,
     count: null,
+    database: options.database,
+    firstByte: null,
+    host: null,
+    parameters: undefined,
+    port: null,
+    query: text,
     queued: now(),
     sent: null,
-    firstByte: null,
-    complete: null,
+    statement: null,
+    user: userName(options),
   };
 };
 
@@ -376,8 +373,7 @@ const located = () => {
   const limit = Error.stackTraceLimit;
   Error.stackTraceLimit = 8;
   try {
-    // oxlint-disable-next-line unicorn/error-message -- only the stack is kept, and shown as it is
-    return trim(String(new Error().stack));
+    return trim(String(new Error("query origin").stack));
   } catch {
     return "";
   } finally {

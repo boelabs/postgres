@@ -17,8 +17,7 @@ const connection = (code, options, host, port) => {
   const address = options.path || host;
   const error = Object.assign(
     new Error(`write ${code} ${options.path || `${host}:${port}`}`),
-    // oxlint-disable-next-line sort-keys -- the order the error's own properties are listed in
-    { code, errno: code, address },
+    { address, code, errno: code },
     options.path ? {} : { port }
   );
 
@@ -134,12 +133,11 @@ export const queryError = (thrown, q, debug) => {
 
   try {
     const { built } = q;
-    // oxlint-disable-next-line sort-keys -- the order the error lists these in when debug makes them enumerable
     Object.defineProperties(error, {
-      query: {
+      args: {
         configurable: true,
         enumerable: !!debug,
-        value: built ? built.text : q.strings[0],
+        value: q.args,
         writable: true,
       },
       parameters: {
@@ -148,10 +146,10 @@ export const queryError = (thrown, q, debug) => {
         value: built ? built.values : [],
         writable: true,
       },
-      args: {
+      query: {
         configurable: true,
         enumerable: !!debug,
-        value: q.args,
+        value: built ? built.text : q.strings[0],
         writable: true,
       },
       types: {

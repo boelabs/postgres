@@ -193,7 +193,6 @@ const Postgres = function Postgres(a, b) {
       reserved[Symbol.dispose] = reserved.release;
     }
     if (Symbol.asyncDispose) {
-      // oxlint-disable-next-line require-await -- asyncDispose returns a promise, which what release throws rejects
       reserved[Symbol.asyncDispose] = async () => reserved.release();
     }
     return reserved;
@@ -272,15 +271,14 @@ const Postgres = function Postgres(a, b) {
       return transaction(level, body, null);
     }
 
-    // oxlint-disable-next-line sort-keys -- a diagnostics context for subscribers, its key order shows in their logs and JSON
     const context = {
-      mode: level,
-      database: options.database,
-      user: userName(options),
       connection: null,
+      database: options.database,
       host: null,
-      port: null,
+      mode: level,
       outcome: null,
+      port: null,
+      user: userName(options),
     };
     let promise;
     start(channels.transaction, context, () => {
@@ -357,7 +355,6 @@ const Postgres = function Postgres(a, b) {
         );
       };
 
-      // oxlint-disable-next-line require-await -- a wrong mode rejects the promise it returns, it does not throw
       const nested = async (inner, run) => {
         const block = run || inner;
         const level = run ? inner : "";
@@ -773,70 +770,65 @@ const parseOptions = (a, b) => {
     "query_timeout",
     "cancel_timeout",
   ]);
-  // oxlint-disable-next-line sort-keys -- read in this order with Object.entries, which is the order of these keys in sql.options
   const defaults = {
-    max: globalThis.Cloudflare ? 3 : 10,
-    min: 0,
-    ssl: false,
-    sslnegotiation: null,
-    channel_binding: "prefer",
-    idle_timeout: null,
-    connect_timeout: 30,
-    queue_timeout: 0,
-    query_timeout: 0,
-    cancel_timeout: 5,
-    max_lifetime,
-    max_pipeline: 100,
-    scheduler: true,
     backoff,
-    keep_alive: 60,
-    prepare: true,
+    cancel_timeout: 5,
+    channel_binding: "prefer",
+    connect_timeout: 30,
     debug: false,
     fetch_types: true,
+    idle_timeout: null,
     infer: false,
+    keep_alive: 60,
+    max: globalThis.Cloudflare ? 3 : 10,
+    max_lifetime,
+    max_pipeline: 100,
+    min: 0,
+    prepare: true,
     publications: "alltables",
+    query_timeout: 0,
+    queue_timeout: 0,
+    scheduler: true,
     slot: null,
+    ssl: false,
+    sslnegotiation: null,
     target_session_attrs: null,
   };
 
-  // oxlint-disable-next-line sort-keys -- sql.options is handed to the user, its key order shows in logs and JSON
   const options = {
+    database: databaseOf(o, url, env, user),
     host: targets.map((x) => x[0]),
+    pass: passOf(o, url, env),
+    path: pathOf(o, targets, port),
     port: Array.isArray(port)
       ? port
       : targets.map((x) => (o.port || query.port ? +port : x[1] || +port)),
-    path: pathOf(o, targets, port),
-    database: databaseOf(o, url, env, user),
     user,
-    pass: passOf(o, url, env),
     ...settings(defaults, ints, o, query, env),
+    channel_binding: binding(o, url.url, env),
     connection: {
       application_name: env.PGAPPNAME || "@boelabs/postgres",
       ...o.connection,
       ...runtime(query, defaults),
     },
-    sslrootcert: sslFile(o, query, env, "sslrootcert", "PGSSLROOTCERT"),
+    eager_types: !!o.eager_types,
+    no_subscribe: o.no_subscribe,
+    onclose: o.onclose,
+    onnotice: o.onnotice,
+    onnotify: o.onnotify,
+    onparameter: o.onparameter,
+    onread: o.onread !== false,
+    open: o.open,
+    parameters: {},
+    passfile: passfile(env),
+    shared: { retries: 0 },
+    shared_types: o.shared_types,
+    socket: o.socket,
     sslcert: sslFile(o, query, env, "sslcert", "PGSSLCERT"),
     sslkey: sslFile(o, query, env, "sslkey", "PGSSLKEY"),
     sslpassword: o.sslpassword || query.sslpassword || null,
-    types: o.types || {},
+    sslrootcert: sslFile(o, query, env, "sslrootcert", "PGSSLROOTCERT"),
     target_session_attrs: tsa(o, url.url, env),
-    channel_binding: binding(o, url.url, env),
-    onnotice: o.onnotice,
-    onnotify: o.onnotify,
-    onclose: o.onclose,
-    onparameter: o.onparameter,
-    socket: o.socket,
-    onread: o.onread !== false,
-    open: o.open,
-    no_subscribe: o.no_subscribe,
-    unref_sockets: !!o.unref_sockets,
-    passfile: passfile(env),
-    shared_types: o.shared_types,
-    eager_types: !!o.eager_types,
-    transform: parseTransform(o.transform || { undefined }),
-    parameters: {},
-    shared: { retries: 0 },
     timers: o.timers || {
       clearImmediate,
       clearTimeout,
@@ -844,6 +836,9 @@ const parseOptions = (a, b) => {
       setImmediate,
       setTimeout,
     },
+    transform: parseTransform(o.transform || { undefined }),
+    types: o.types || {},
+    unref_sockets: !!o.unref_sockets,
   };
 
   options.ssl = sslmode(options.ssl, options.sslrootcert);

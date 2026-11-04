@@ -168,11 +168,14 @@ export const startup = (w, parameters) => {
 export const sasl = (w, mechanism, initial) =>
   w.type(p).str(mechanism).i32(Buffer.byteLength(initial)).bytes(initial).end();
 
+const int32 = new Int32Array(1);
+
 export const parse = (w, name, text, oids = []) => {
   w.type(P).str(name).str(text).u16(oids.length);
   for (const oid of oids) {
-    // oxlint-disable-next-line unicorn/prefer-math-trunc -- ToInt32: an oid above 2^31 must wrap to the signed value the wire takes
-    w.i32(oid | 0);
+    // ToInt32, as the wire takes an oid: one above 2^31 wraps to its signed value.
+    int32[0] = oid;
+    w.i32(int32[0]);
   }
 
   return w.end();
@@ -525,8 +528,9 @@ export const commandComplete = (x, start, end) => {
   return { command: text(x, first, e), count };
 };
 
-// oxlint-disable-next-line unicorn/prefer-code-point -- past the end of a short message the byte is undefined, which fromCharCode reads as 0 and fromCodePoint throws on
-export const readyForQuery = (x, start) => String.fromCharCode(x[start + 5]);
+// Past the end of a short message the byte is undefined, read as 0.
+export const readyForQuery = (x, start) =>
+  String.fromCodePoint(x[start + 5] ?? 0);
 
 export const notification = (x, start) => {
   const zero = x.indexOf(0, start + 9);

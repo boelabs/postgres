@@ -999,10 +999,8 @@ t(
 );
 
 t("A nested sql.begin can not be prepared", async () => {
-  // oxlint-disable-next-line require-await -- the transaction is given a promise, as before
   const code = await sql.begin(async (tx) =>
     tx
-      // oxlint-disable-next-line require-await -- the throw becomes a rejection here, as before
       .begin(async (inner) => inner.prepare("x"))
       .then(
         () => "ran",
