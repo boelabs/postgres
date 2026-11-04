@@ -9,13 +9,13 @@ Nothing to configure: install it with `bun add @boelabs/postgres` and import it 
 ## Dynamic imports and CommonJS
 
 ```js
-const { default: postgres } = await import('@boelabs/postgres')
+const { default: postgres } = await import("@boelabs/postgres");
 ```
 
 From CommonJS, `require` loads it as well:
 
 ```js
-const postgres = require('@boelabs/postgres').default
+const postgres = require("@boelabs/postgres").default;
 ```
 
 ## Cloudflare Workers support
@@ -25,20 +25,20 @@ const postgres = require('@boelabs/postgres').default
 You can use @boelabs/postgres directly in a Worker, or to benefit from connection pooling and query caching, via the [Hyperdrive](https://developers.cloudflare.com/hyperdrive/learning/connect-to-postgres/#driver-examples) service available to Workers by passing the Hyperdrive `connectionString` when creating a new `postgres` client as follows:
 
 ```ts
-import postgres from '@boelabs/postgres'
+import postgres from "@boelabs/postgres";
 
 interface Env {
-  HYPERDRIVE: Hyperdrive
+  HYPERDRIVE: Hyperdrive;
 }
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
-    const sql = postgres(env.HYPERDRIVE.connectionString)
-    const results = await sql`SELECT * FROM users LIMIT 10`
-    ctx.waitUntil(sql.end())
-    return Response.json(results)
-  }
-}
+    const sql = postgres(env.HYPERDRIVE.connectionString);
+    const results = await sql`SELECT * FROM users LIMIT 10`;
+    ctx.waitUntil(sql.end());
+    return Response.json(results);
+  },
+};
 ```
 
 @boelabs/postgres uses `Buffer`, `crypto` and `events` from the Node.js compatibility of Workers, which is on by default from the compatibility date 2026-08-04. For an earlier date, enable it in `wrangler.toml`:

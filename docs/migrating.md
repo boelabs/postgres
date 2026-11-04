@@ -28,7 +28,7 @@ The API is the same as postgres v3's, and most code runs unchanged. Check these,
 v3 typed a `Date` as `timestamptz`, a boolean as `boolean`, a `Buffer` as `bytea`, a `bigint` as `int8` and arrays of these by their first element. @boelabs/postgres sends them without a type and the server decides from the query (see [Parameter types](queries.md#parameter-types)). `infer: true` keeps v3's behaviour:
 
 ```js
-const sql = postgres({ infer: true })
+const sql = postgres({ infer: true });
 ```
 
 Nothing changes for `timestamptz` columns, for values written to a column of their own type, for strings and numbers, or for anything with a cast. What does change:
@@ -54,13 +54,13 @@ If it returns no columns, or the time zone is `UTC` and so is your Node.js proce
 **Errors that need a cast.** A `Date` given where the query doesn't decide its type is now an error from the server, with the fix in the query:
 
 | Query | Error | With a cast |
-| ----- | ----- | ----------- |
-| ``date_trunc('day', ${ date })``, `extract`, `to_char`, `to_json`, `jsonb_build_object` | `42725` function is not unique, or `42P18` / `42804` could not determine the type | `${ date }::timestamptz` |
-| ``${ date } + interval '1 day'`` | `22007` invalid input syntax for type interval | `${ date }::timestamptz + interval '1 day'` |
+| --- | --- | --- |
+| `date_trunc('day', ${ date })`, `extract`, `to_char`, `to_json`, `jsonb_build_object` | `42725` function is not unique, or `42P18` / `42804` could not determine the type | `${ date }::timestamptz` |
+| `${ date } + interval '1 day'` | `22007` invalid input syntax for type interval | `${ date }::timestamptz + interval '1 day'` |
 | A `Date` written to a `time` column | `22007` invalid input syntax for type time | `${ date }::timestamptz::time` |
-| ``${ 2n ** 60n } + 1`` | `22003` out of range for type integer | `${ n }::int8 + 1` |
+| `${ 2n ** 60n } + 1` | `22003` out of range for type integer | `${ n }::int8 + 1` |
 
-**Values that come back as text.** A boolean, `Date`, `Buffer` or array that is only selected back, as in ``select ${ true } as x``, comes back as a string, since the server reads it as text; cast it to get the type back. A `Buffer` written to a `text` column is stored as its text instead of `\x` hex, a `Date` written to a `text` column as an ISO string ending in `Z`, and `${ 10n } + 1` gives the number `11` instead of the string `'11'`. A string such as `'yes'` or `'t'` for a `boolean` is now read by the server as `true`; v3 wrote any string for a `boolean` as `false`.
+**Values that come back as text.** A boolean, `Date`, `Buffer` or array that is only selected back, as in `select ${ true } as x`, comes back as a string, since the server reads it as text; cast it to get the type back. A `Buffer` written to a `text` column is stored as its text instead of `\x` hex, a `Date` written to a `text` column as an ISO string ending in `Z`, and `${ 10n } + 1` gives the number `11` instead of the string `'11'`. A string such as `'yes'` or `'t'` for a `boolean` is now read by the server as `true`; v3 wrote any string for a `boolean` as `false`.
 
 **One more round trip.** A query whose parameters are all dates, booleans, `bigint`s, `Buffer`s or arrays of these is described before its first run on each connection, as queries with strings and numbers already were.
 

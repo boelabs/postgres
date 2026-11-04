@@ -3,27 +3,33 @@
   "version": "1.0.0",
   "description": "Fast, full-featured PostgreSQL client for Node.js, Bun and Cloudflare Workers, with no dependencies",
   "keywords": [
+    "bun",
+    "client",
+    "cloudflare-workers",
+    "database",
+    "driver",
+    "pg",
     "postgres",
     "postgresql",
-    "pg",
-    "client",
-    "driver",
-    "sql",
-    "database",
-    "bun",
-    "cloudflare-workers"
+    "sql"
   ],
   "homepage": "https://github.com/boelabs/postgres#readme",
   "bugs": {
     "url": "https://github.com/boelabs/postgres/issues"
   },
+  "license": "MIT",
+  "author": "Boelabs (https://boelabs.com)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/boelabs/postgres.git"
   },
-  "license": "MIT",
-  "author": "Boelabs (https://boelabs.com)",
+  "files": [
+    "/src/*.js",
+    "/types/index.d.ts"
+  ],
   "type": "module",
+  "main": "src/index.js",
+  "types": "types/index.d.ts",
   "exports": {
     ".": {
       "types": "./types/index.d.ts",
@@ -32,17 +38,16 @@
     },
     "./package.json": "./package.json"
   },
-  "main": "src/index.js",
-  "types": "types/index.d.ts",
-  "files": [
-    "/src/*.js",
-    "/types/index.d.ts"
-  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
+    "check": "ultracite check",
     "check:docs": "node scripts/check-docs.js",
     "coverage": "node tests/coverage.js",
-    "lint": "eslint --max-warnings 0 .",
-    "prepublishOnly": "npm run lint && npm run test:types && npm run test:unit",
+    "fix": "ultracite fix",
+    "prepublishOnly": "npm run check && npm run test:types && npm run test:unit",
     "test": "node tests/unit && node tests/index.js && node tests/simulate.js",
     "test:bun": "bun tests/unit/index.js && bun tests/index.js && bun tests/simulate.js",
     "test:cf": "sh tests/cf/run.sh",
@@ -53,17 +58,13 @@
     "test:unit": "node tests/unit"
   },
   "devDependencies": {
-    "@stylistic/eslint-plugin": "5.10.0",
     "@types/node": "24.19.2",
-    "eslint": "10.14.0",
-    "globals": "17.14.0",
-    "typescript": "7.0.2"
+    "oxfmt": "0.75.0",
+    "oxlint": "1.91.0",
+    "typescript": "7.0.2",
+    "ultracite": "8.1.1"
   },
   "engines": {
     "node": ">=24"
-  },
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
   }
 }
