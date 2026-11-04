@@ -1,0 +1,69 @@
+{
+  "name": "@boelabs/postgres",
+  "version": "1.0.0",
+  "description": "Fast, full-featured PostgreSQL client for Node.js, Bun and Cloudflare Workers, with no dependencies",
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "pg",
+    "client",
+    "driver",
+    "sql",
+    "database",
+    "bun",
+    "cloudflare-workers"
+  ],
+  "homepage": "https://github.com/boelabs/postgres#readme",
+  "bugs": {
+    "url": "https://github.com/boelabs/postgres/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boelabs/postgres.git"
+  },
+  "license": "MIT",
+  "author": "Boelabs (https://boelabs.com)",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "workerd": "./src/cf.js",
+      "default": "./src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "src/index.js",
+  "types": "types/index.d.ts",
+  "files": [
+    "/src/*.js",
+    "/types/index.d.ts"
+  ],
+  "scripts": {
+    "check:docs": "node scripts/check-docs.js",
+    "coverage": "node tests/coverage.js",
+    "lint": "eslint --max-warnings 0 .",
+    "prepublishOnly": "npm run lint && npm run test:types && npm run test:unit",
+    "test": "node tests/unit && node tests/index.js && node tests/simulate.js",
+    "test:bun": "bun tests/unit/index.js && bun tests/index.js && bun tests/simulate.js",
+    "test:cf": "sh tests/cf/run.sh",
+    "test:docker": "sh tests/docker/run.sh",
+    "test:integration": "node tests/index.js",
+    "test:simulate": "node tests/simulate.js",
+    "test:types": "tsc -p types",
+    "test:unit": "node tests/unit"
+  },
+  "devDependencies": {
+    "@stylistic/eslint-plugin": "5.10.0",
+    "@types/node": "24.19.2",
+    "eslint": "10.14.0",
+    "globals": "17.14.0",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

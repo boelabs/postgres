@@ -1,0 +1,44 @@
+name: Pull requests
+
+# Pull requests are opened by the project's collaborators only (CONTRIBUTING.md). One from anyone
+# else is closed, with a note that points to issues.
+#
+# pull_request_target runs this workflow as it is on main, with this repository's token, for pull
+# requests from forks too. It only reads the event and calls the API: it never checks out or runs
+# the pull request's code.
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions: {}
+
+jobs:
+  collaborators-only:
+    name: Collaborators only
+    # Members and collaborators are known from the event; bots (Dependabot) are welcome.
+    if: >-
+      github.event.pull_request.user.type != 'Bot' &&
+      !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      NUMBER: ${{ github.event.pull_request.number }}
+      AUTHOR: ${{ github.event.pull_request.user.login }}
+    steps:
+      # author_association hides an organization member whose membership is private, so whoever can
+      # push to the repository is asked about before anything is closed.
+      - name: Close a pull request from outside the team
+        run: |
+          set -euo pipefail
+          permission=$(gh api "repos/$GH_REPO/collaborators/$AUTHOR/permission" --jq .permission 2>/dev/null || echo none)
+          case "$permission" in
+            admin|maintain|write)
+              echo "$AUTHOR can push ($permission): nothing to do."
+              exit 0
+              ;;
+          esac
+          gh pr close "$NUMBER" --comment "Thanks for taking the time, @$AUTHOR! Pull requests to this repository are opened by its maintainers only, so this one is closed. Please open an issue instead, with a bug report or a feature request: a failing test or the code you would like to write is the best start. See [CONTRIBUTING.md](https://github.com/$GH_REPO/blob/main/CONTRIBUTING.md)."
