@@ -1,0 +1,56 @@
+name: Bug report
+description: Something in @boelabs/postgres behaves wrongly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please do **not** include real passwords, connection strings or
+        private keys. For security vulnerabilities, follow SECURITY.md instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you saw, and what you expected instead. Include the error with its `code`.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Code to reproduce
+      description: The smallest code that shows it, with the options passed to `postgres()`.
+      render: js
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: "@boelabs/postgres version"
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime
+      options:
+        - Node.js
+        - Bun
+        - Cloudflare Workers
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Runtime and PostgreSQL versions
+      placeholder: "Node.js 24.22, PostgreSQL 18.6"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, how PostgreSQL is reached (direct, PgBouncer, Hyperdrive, TLS mode), anything else relevant.
+    validations:
+      required: false

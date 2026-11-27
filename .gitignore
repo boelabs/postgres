@@ -1,0 +1,11 @@
+node_modules/
+coverage/
+*.log
+*.tgz
+.DS_Store
+
+# Test clusters made by tests/setup.sh, and what the Workers test leaves behind
+tests/.pgdata/
+tests/cf/.wrangler/
+tests/cf/wrangler.log
+tests/cf/result.json

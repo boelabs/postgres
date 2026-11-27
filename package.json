@@ -1,0 +1,71 @@
+{
+  "name": "@boelabs/postgres",
+  "version": "1.0.0",
+  "description": "Fast, full-featured PostgreSQL client for Node.js, Bun and Cloudflare Workers, with no dependencies",
+  "keywords": [
+    "bun",
+    "client",
+    "cloudflare-workers",
+    "database",
+    "driver",
+    "pg",
+    "postgres",
+    "postgresql",
+    "sql"
+  ],
+  "homepage": "https://github.com/boelabs/postgres#readme",
+  "bugs": {
+    "url": "https://github.com/boelabs/postgres/issues"
+  },
+  "license": "MIT",
+  "author": "Boelabs (https://boelabs.com)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boelabs/postgres.git"
+  },
+  "files": [
+    "/src/*.js",
+    "/types/index.d.ts"
+  ],
+  "type": "module",
+  "main": "src/index.js",
+  "types": "types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "workerd": "./src/cf.js",
+      "default": "./src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "check": "ultracite check",
+    "check:docs": "node scripts/check-docs.js",
+    "coverage": "node tests/coverage.js",
+    "fix": "ultracite fix",
+    "prepublishOnly": "pnpm run check && pnpm run test:types && pnpm run test:unit",
+    "test": "node tests/unit && node tests/index.js && node tests/simulate.js",
+    "test:bun": "bun tests/unit/index.js && bun tests/index.js && bun tests/simulate.js",
+    "test:cf": "sh tests/cf/run.sh",
+    "test:docker": "sh tests/docker/run.sh",
+    "test:integration": "node tests/index.js",
+    "test:simulate": "node tests/simulate.js",
+    "test:types": "tsc -p types",
+    "test:unit": "node tests/unit"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.4",
+    "oxfmt": "0.80.0",
+    "oxlint": "1.95.0",
+    "typescript": "7.0.2",
+    "ultracite": "8.3.1"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@12.16.1"
+}

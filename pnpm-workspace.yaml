@@ -1,0 +1,4 @@
+# Ultracite is only the linter and formatter here: the skill it bundles is not installed.
+permissions:
+  ultracite:
+    skills: false
