@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1
+
+The same code as 1.0.0, published from this repository again so that npm can verify where it comes from: the provenance of 1.0.0 names a commit that is no longer here.
+
 ## 1.0.0
 
 The first release of @boelabs/postgres. It starts from [Postgres.js](https://github.com/porsager/postgres) after its 4.0.0, with the work its 4.1.0 had then, and keeps its API. Coming from `postgres`, read [Migrating from postgres](./docs/migrating.md).

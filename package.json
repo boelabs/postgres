@@ -1,6 +1,6 @@
 {
   "name": "@boelabs/postgres",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Fast, full-featured PostgreSQL client for Node.js, Bun and Cloudflare Workers, with no dependencies",
   "keywords": [
     "bun",
